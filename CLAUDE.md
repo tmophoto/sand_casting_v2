@@ -31,18 +31,53 @@ automatically.
 
 ## Architecture
 
-All application code lives in a single file: **`casting_sim.py`** (~1,800 lines).
+The codebase is split into a package structure. `casting_sim.py` is a thin
+73-line entry point; all logic lives in the modules below.
 
-| Component | Lines | Role |
+```
+casting_sim.py          # entry point — calls main()
+constants.py            # METAL_DEFAULTS, FLASK_SIZES, colour constants
+ui/
+  style.py              # APP_STYLE QSS (Catppuccin Mocha dark theme)
+  collapsible.py        # CollapsiblePanel widget
+  main_window.py        # MainWindow — UI layout, signal wiring, event handlers
+simulation/
+  worker.py             # SimWorker — physics calculations in a QThread
+viewport/
+  viewport.py           # Viewport3D — 3D rendering, STL loading, animation
+results/
+  formatter.py          # build_results_text() — formats result dict → text
+tests/
+  test_simulation.py    # SimWorker physics (headless, 30 tests)
+  test_formatter.py     # build_results_text output format (27 tests)
+  test_geometry.py      # geometry helpers and mesh generators (37 tests)
+```
+
+### Module Summary
+
+| Module | Key class / function | Role |
 |---|---|---|
-| `CollapsiblePanel` | ~65 | Collapsible QFrame UI widget |
-| `SimWorker` | ~100 | QObject worker (runs in QThread) for physics |
-| `Viewport3D` | ~1,000 | 3-D rendering (PyVista or matplotlib fallback) |
-| `build_results_text()` | ~50 | Formats simulation results dict → plain text |
-| `MainWindow` | ~400 | Main application window, UI, signal wiring |
+| `constants.py` | — | All shared constants; no deps on other app modules |
+| `ui/style.py` | `APP_STYLE` | QSS stylesheet string |
+| `ui/collapsible.py` | `CollapsiblePanel` | Collapsible QFrame widget |
+| `ui/main_window.py` | `MainWindow` | Top-level window, UI, signal wiring |
+| `simulation/worker.py` | `SimWorker` | QObject worker; runs physics in QThread |
+| `viewport/viewport.py` | `Viewport3D` | 3-D rendering (PyVista or matplotlib fallback) |
+| `results/formatter.py` | `build_results_text()` | Formats simulation results → plain text |
 
-Constants defined at module level: `METAL_DEFAULTS`, `GATING_COMPONENTS`,
-`FLASK_SIZES`, colour constants, `APP_STYLE` (Catppuccin Mocha dark theme QSS).
+### Dependency graph (no circular deps)
+
+```
+constants ← simulation/worker
+constants ← viewport/viewport
+constants ← ui/main_window
+ui/style   ← ui/main_window
+ui/collapsible ← ui/main_window
+simulation/worker ← ui/main_window
+viewport/viewport ← ui/main_window
+results/formatter ← ui/main_window
+ui/main_window ← casting_sim
+```
 
 ## Physics
 
@@ -67,8 +102,8 @@ Constants defined at module level: `METAL_DEFAULTS`, `GATING_COMPONENTS`,
 2. **Matplotlib 3D** (fallback) — software-rendered Poly3DCollection with per-face
    Phong shading. Always available.
 
-The `PV_AVAILABLE` flag gates which backend is used; `Viewport3D.use_pyvista`
-records which backend was successfully initialised at runtime.
+`PV_AVAILABLE` in `viewport/viewport.py` gates which backend is used;
+`Viewport3D.use_pyvista` records which was successfully initialised at runtime.
 
 ## STL Handling
 
@@ -80,11 +115,21 @@ records which backend was successfully initialised at runtime.
 `_geometry_stats()` computes volume via the divergence theorem and surface area
 from cross-product magnitudes — both in one vectorised NumPy pass.
 
+## Running Tests
+
+```bash
+python -m pytest tests/
+```
+
+All tests are headless (no display required). The simulation and geometry tests
+import modules directly; only `test_simulation.py` needs a QApplication instance
+(created automatically inside the test file).
+
 ## Helper Scripts (not part of the app)
 
 The root directory contains several one-off scripts (`fix_*.py`, `part*.py`) that
-were used during incremental development to patch earlier versions of the file.
-They are **not** required to run the application and can be safely ignored.
+were used during incremental development. They are **not** required to run the
+application and can be safely deleted.
 
 ## Git Branch
 
@@ -96,22 +141,28 @@ Always develop on this branch; do not push directly to `master`.
 
 ### Add a new metal
 
-1. Add an entry to `METAL_DEFAULTS` in `casting_sim.py`.
-2. The `MainWindow._build_ui()` method auto-populates the combo box from that dict.
+1. Add an entry to `METAL_DEFAULTS` in `constants.py`.
+2. `MainWindow._build_ui()` auto-populates the combo box from that dict —
+   no other changes needed.
 
 ### Add a new gating component
 
-1. Add the display name to `GATING_COMPONENTS`.
-2. Add rendering logic in `Viewport3D._draw_gating()` (matplotlib) and optionally
-   in `_render_pyvista()`.
-3. Handle it in `SimWorker._compute_fill_time_gating_hydraulics()` if it affects
-   flow area.
+1. Add the display name string to the checkbox list in `MainWindow._build_ui()`
+   (`ui/main_window.py`).
+2. Add rendering logic in `Viewport3D._draw_gating()` (matplotlib path) in
+   `viewport/viewport.py`, and optionally in `_render_pyvista()`.
+3. If it affects flow area, add a branch in
+   `SimWorker._compute_fill_time_gating_hydraulics()` in `simulation/worker.py`.
+4. Expose its dimensions in `Viewport3D.get_gating_params()`.
 
 ### Run a quick sanity check (no GUI)
 
 ```python
-from casting_sim import SimWorker, METAL_DEFAULTS
+from simulation.worker import SimWorker
+
+result = {}
 w = SimWorker({"metal": "A356 Aluminum", "vol_cm3": 200, "surf_cm2": 180})
-w.finished.connect(print)
+w.finished.connect(result.update)
 w.run()
+print(result)
 ```
