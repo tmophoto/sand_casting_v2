@@ -14,7 +14,7 @@ class SimWorker(QObject):
 
 
 
-    def __init__(self, params: dict):
+    def __init__(self, params: dict) -> None:
         super().__init__()
         self.params = params
 
@@ -104,7 +104,7 @@ class SimWorker(QObject):
 
 
 
-    def run(self):
+    def run(self) -> None:
         p = self.params
         metal_name = p.get("metal", "A356 Aluminum")
         metal      = METAL_DEFAULTS[metal_name]

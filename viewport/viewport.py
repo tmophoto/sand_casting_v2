@@ -151,7 +151,7 @@ class Viewport3D(QWidget):
 
 
 
-    def get_model_names(self):
+    def get_model_names(self) -> list[str]:
         return list(self.models.keys())
 
 
@@ -161,7 +161,7 @@ class Viewport3D(QWidget):
 
 
 
-    def remove_model(self, name: str):
+    def remove_model(self, name: str) -> None:
         self.models.pop(name, None)
         self.transforms.pop(name, None)
         if self.active_model == name:
@@ -831,7 +831,7 @@ class Viewport3D(QWidget):
             color = colors.get(dtype, "red" if "shrinkage" in desc else "yellow" if "cold" in desc else "gray")
             self.ax.scatter(x, y, z, c=color, s=200, marker="o", depthshade=True)
 
-    def draw_defect_markers(self, defects):
+    def draw_defect_markers(self, defects: list) -> None:
 
         """Public method to draw defect markers using current backend."""
 
@@ -1028,7 +1028,7 @@ class Viewport3D(QWidget):
 
 
 
-    def set_transformation(self, dx, dy, dz, rot_z):
+    def set_transformation(self, dx: float, dy: float, dz: float, rot_z: float) -> None:
         if not self.active_model or self.active_model not in self.transforms:
             return
         self.transforms[self.active_model] = {
@@ -1039,7 +1039,7 @@ class Viewport3D(QWidget):
 
 
 
-    def set_gating_offset(self, sprue_x, sprue_y, runner_y, riser_x, riser_y):
+    def set_gating_offset(self, sprue_x: float, sprue_y: float, runner_y: float, riser_x: float, riser_y: float) -> None:
         self.sprue_offset     = np.array([float(sprue_x), float(sprue_y)])
         self.runner_y_offset  = float(runner_y)
         self.riser_offset     = np.array([float(riser_x), float(riser_y)])
@@ -1047,7 +1047,7 @@ class Viewport3D(QWidget):
 
 
 
-    def set_flask(self, size_tuple):
+    def set_flask(self, size_tuple: tuple[float, float]) -> None:
         self.flask_size = size_tuple
         self.render(self._anim_frac)
 
@@ -1059,7 +1059,7 @@ class Viewport3D(QWidget):
 
 
 
-    def set_gating(self, components: list):
+    def set_gating(self, components: list[str]) -> None:
         self.gating = [c for c in components if c != "None"]
         self.render(self._anim_frac)
 
@@ -1286,7 +1286,7 @@ class Viewport3D(QWidget):
 
 
 
-    def start_fill_animation(self, duration_s: float = 3.0, on_done=None):
+    def start_fill_animation(self, duration_s: float = 3.0, on_done: "callable | None" = None) -> None:
         self._anim_done_cb = on_done
         self._anim_step    = 0
         self._anim_steps   = 40
@@ -1335,7 +1335,7 @@ class Viewport3D(QWidget):
 
 
 
-    def reset_anim(self):
+    def reset_anim(self) -> None:
 
         """Stop animation and clear all loaded model state."""
 

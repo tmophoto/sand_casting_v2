@@ -399,7 +399,7 @@ class MainWindow(QMainWindow):
 
 
 
-    def _on_gating_moved(self, data):
+    def _on_gating_moved(self, data: dict) -> None:
         """Sync sliders from 3D drag operations."""
         self.sprue_x_slider.blockSignals(True)
         self.sprue_y_slider.blockSignals(True)
@@ -414,7 +414,7 @@ class MainWindow(QMainWindow):
         self.riser_x_slider.blockSignals(False)
         self.riser_y_slider.blockSignals(False)
 
-    def _on_load_stl(self):
+    def _on_load_stl(self) -> None:
         """Handle STL file load button click."""
         filename, _ = QFileDialog.getOpenFileName(
             self, "Load STL File", "", "STL Files (*.stl);;All Files (*)"
@@ -427,7 +427,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load STL:\n{str(e)}")
 
-    def _on_parting_changed(self, val):
+    def _on_parting_changed(self, val: int) -> None:
         """Handle parting line slider change."""
         frac = val / 100.0
         self.viewport.set_parting(frac)
@@ -439,7 +439,7 @@ class MainWindow(QMainWindow):
                     widget.setText("Position: " + str(val) + "%")
                     break
 
-    def _on_metal_changed(self, index):
+    def _on_metal_changed(self, index: int) -> None:
         """Handle metal combo box change."""
         metal_name = self.metal_combo.currentText()
         pour_temp = METAL_DEFAULTS[metal_name]["pour_temp_f"]
@@ -447,7 +447,7 @@ class MainWindow(QMainWindow):
         self.pour_spin.setValue(pour_temp)
         self.shrink_label.setText("Shrinkage: " + str(shrink_pct) + "% (" + metal_name + ")")
 
-    def _on_flask_changed(self, text):
+    def _on_flask_changed(self, text: str) -> None:
         """Handle flask size combo box change."""
         size = self._flask_presets.get(text, (8, 10))
         self.viewport.set_flask(size)
@@ -469,7 +469,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.warning(self, "Error", "Invalid format: " + str(e))
 
-    def _on_simulate(self):
+    def _on_simulate(self) -> None:
         """Run the casting simulation."""
         # Gather all parameters
         metal_name = self.metal_combo.currentText()
@@ -504,12 +504,12 @@ class MainWindow(QMainWindow):
         self._sim_thread.started.connect(self._sim_worker.run)
         self._sim_thread.start()
 
-    def _on_sim_progress(self, pct, msg):
+    def _on_sim_progress(self, pct: int, msg: str) -> None:
         """Update progress during simulation."""
         self.progress_bar.setFormat(f"{msg} {int(pct)}%")
         self.progress_bar.setValue(int(pct))
 
-    def _on_sim_done(self, result):
+    def _on_sim_done(self, result: dict) -> None:
         """Handle simulation completion."""
         self.progress_bar.setVisible(False)
         self.sim_btn.setEnabled(True)
@@ -538,7 +538,7 @@ class MainWindow(QMainWindow):
         else:
             self.results_text.setText("Simulation failed or was cancelled.")
 
-    def _on_reset(self):
+    def _on_reset(self) -> None:
         """Reset the application state."""
         self.viewport.reset_anim()
         # Reset sliders to defaults
