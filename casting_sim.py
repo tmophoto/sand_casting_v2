@@ -172,6 +172,15 @@ METAL_DEFAULTS = {
 
 
 
+FLASK_SIZES = {
+    "6 x 6":   (6,  6),
+    "6 x 8":   (6,  8),
+    "8 x 10":  (8,  10),
+    "10 x 12": (10, 12),
+    "12 x 14": (12, 14),
+    "14 x 20": (14, 20),
+}
+
 # Viewport colors
 COPE_COLOR   = "#4A90D9"
 DRAG_COLOR   = "#C0834A"
@@ -1992,10 +2001,7 @@ class MainWindow(QMainWindow):
         flask_layout = QVBoxLayout()
         flask_container.setLayout(flask_layout)
         self.flask_combo = QComboBox()
-        self._flask_presets = {
-            "6 x 6": (6, 6), "6 x 8": (6, 8), "8 x 10": (8, 10),
-            "10 x 12": (10, 12), "12 x 14": (12, 14), "14 x 20": (14, 20),
-        }
+        self._flask_presets = dict(FLASK_SIZES)  # mutable copy; grows with custom presets
         for name in self._flask_presets:
             self.flask_combo.addItem(name)
         self.add_flask_btn = QPushButton("+ Custom")
