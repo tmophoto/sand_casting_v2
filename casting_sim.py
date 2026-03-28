@@ -2162,16 +2162,6 @@ class MainWindow(QMainWindow):
         self.riser_y_slider.valueChanged.connect(lambda v: update_gating())
 
 
-        # Pour rate slider
-
-        def on_pour_rate_changed(val):
-            rate = 0.1 + (val / 50.0)
-            self.viewport.set_pour_rate(rate)
-
-
-        self.pour_spin.valueChanged.connect(on_pour_rate_changed)
-
-
         # Shrinkage slider
 
         def update_shrink_label(val):
