@@ -172,60 +172,18 @@ METAL_DEFAULTS = {
 
 
 
-GATING_COMPONENTS = [
-    "None",
-    "Tapered Sprue",
-    "Runner (Horizontal)",
-    "Fan Gate",
-    "Riser (Open)",
-]
-
-
-
-FLASK_SIZES = {
-    "6×6":   (6,  6),
-    "6×8":   (6,  8),
-    "8×10":  (8,  10),   # default
-    "10×12": (10, 12),
-    "12×14": (12, 14),
-    "14×20": (14, 20),
-}
-
-
-
 # Viewport colors
-
 COPE_COLOR   = "#4A90D9"
-
 DRAG_COLOR   = "#C0834A"
-
-METAL_FILL   = "#FFD700"
-
 SPRUE_COLOR  = "#E87040"
-
 RUNNER_COLOR = "#D4A030"
-
 GATE_COLOR   = "#A0C840"
-
 RISER_COLOR  = "#70A0FF"
-
-PART_GREY    = "#BEC1D2"
-
-
 
 MODEL_COLORS = [
     "#BEC1D2", "#89DCEB", "#A6E3A1",
     "#FAB387", "#F38BA8", "#CBA6F7",
 ]
-
-
-
-# PBR material properties for metals
-
-PBR_PROPS = {
-    "aluminum": {"base_color": [0.8, 0.8, 0.9], "metallic": 0.9, "roughness": 0.15},
-    "bronze":   {"base_color": [0.85, 0.65, 0.25], "metallic": 0.8, "roughness": 0.25},
-}
 
 
 
