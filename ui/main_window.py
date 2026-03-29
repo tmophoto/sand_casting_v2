@@ -4,8 +4,10 @@ from PyQt6.QtWidgets import (
     QProgressBar, QFileDialog, QInputDialog, QMessageBox
 )
 from PyQt6.QtCore import Qt, QThread
+import numpy as np
 from ui.style import APP_STYLE
 from ui.collapsible import CollapsiblePanel
+from ui.demo_part import build_demo_mesh, DEMO_PART_NAME
 from viewport.viewport import Viewport3D
 from simulation.worker import SimWorker
 from results.formatter import build_results_text
@@ -61,9 +63,18 @@ class MainWindow(QMainWindow):
         stl_layout = QVBoxLayout()
         stl_container.setLayout(stl_layout)
         self.load_btn = QPushButton("Load STL...")
+        self.demo_btn = QPushButton("▶ Try Demo")
+        self.demo_btn.setToolTip(
+            "Load a pre-built Motor Mount Bracket with all settings pre-configured.\n"
+            "Press Simulate Pour to see fill animation and defect analysis."
+        )
+        self.demo_btn.setStyleSheet(
+            "QPushButton { background-color: #A6E3A1; color: black; font-weight: bold; padding: 6px; }"
+        )
         self.stl_label = QLabel("No file loaded")
         self.stl_label.setWordWrap(True)
         stl_layout.addWidget(self.load_btn)
+        stl_layout.addWidget(self.demo_btn)
         stl_layout.addWidget(self.stl_label)
         # Add container widget (not layout) to panel
         stl_panel.content_layout.addWidget(stl_container)
@@ -311,6 +322,9 @@ class MainWindow(QMainWindow):
         # STL Load button
         self.load_btn.clicked.connect(self._on_load_stl)
 
+        # Demo button
+        self.demo_btn.clicked.connect(self._on_load_demo)
+
 
         # Parting slider
         self.parting_slider.valueChanged.connect(self._on_parting_changed)
@@ -426,6 +440,66 @@ class MainWindow(QMainWindow):
                 self._geometry_stats = stats
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load STL:\n{str(e)}")
+
+    def _on_load_demo(self) -> None:
+        """Load the built-in Motor Mount Bracket demo with pre-configured settings."""
+        # 1. Reset to clean state (clears animations, sliders, gating)
+        self._on_reset()
+
+        # 2. Build the procedural mesh
+        triangles, normals, stats = build_demo_mesh()
+
+        # 3. Inject into viewport — bypasses load_stl / file dialog entirely
+        self.viewport.models[DEMO_PART_NAME] = {
+            "render_data": triangles,
+            "normals":     normals,
+            "mesh":        None,
+        }
+        self.viewport.transforms[DEMO_PART_NAME] = {
+            "offset":   np.array([0.0, 0.0, 0.0]),
+            "rotation": 0.0,
+        }
+        self.viewport.active_model = DEMO_PART_NAME
+
+        # 4. Store geometry stats for the simulation worker
+        self._geometry_stats = stats
+
+        # 5. Flask: 10 x 12 inches
+        self.flask_combo.setCurrentText("10 x 12")
+
+        # 6. Metal: A356 Aluminum (fires _on_metal_changed → sets pour temp)
+        self.metal_combo.setCurrentText("A356 Aluminum")
+
+        # 7. Pour temp: 1160 F  (superheat = 85 F → triggers cold-shut + low-superheat)
+        self.pour_spin.setValue(1160)
+
+        # 8. Mold temp: default 100 F (already set by reset)
+
+        # 9. Thin wall: Yes — needed for cold-shut defect detection
+        self.thin_combo.setCurrentIndex(1)
+
+        # 10. Parting line at 39% — bisects central body just above base plate
+        self.parting_slider.setValue(39)
+
+        # 11. Gating: full set
+        for name in ["Tapered Sprue", "Runner (Horizontal)", "Fan Gate", "Riser (Open)"]:
+            self.gating_checkboxes[name].setChecked(True)
+
+        # 12. Sprue at (+100, +100) — right-front corner; riser at (-80, +70)
+        self.sprue_x_slider.setValue(100)
+        self.sprue_y_slider.setValue(100)
+        self.riser_x_slider.setValue(-80)
+        self.riser_y_slider.setValue(70)
+
+        # 13. Update the STL label
+        self.stl_label.setText(
+            "Demo: Motor Mount Bracket\n"
+            f"Volume: {stats['vol_cm3']:.2f} cm\u00b3 | Surface: {stats['surf_cm2']:.2f} cm\u00b2\n"
+            "Height: 102 mm  \u2014  7 primitives"
+        )
+
+        # 14. Final render with all new state
+        self.viewport.render()
 
     def _on_parting_changed(self, val: int) -> None:
         """Handle parting line slider change."""
