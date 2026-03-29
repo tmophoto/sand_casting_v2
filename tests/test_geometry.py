@@ -192,9 +192,8 @@ class TestMakeBoxMesh:
         """Vertices span z_bottom to z_bottom + height."""
         faces = make_box(0, 0, 5.0, 10.0, 10.0, 6.0)
         z_vals = faces[:, :, 2].ravel()
-        # _make_box_mesh uses centred half-height; z_bottom offsets the centre
-        assert z_vals.min() >= 5.0 - 3.0 - 1e-9
-        assert z_vals.max() <= 5.0 + 3.0 + 1e-9
+        assert z_vals.min() >= 5.0 - 1e-9
+        assert z_vals.max() <= 5.0 + 6.0 + 1e-9
 
     def test_x_range(self):
         faces = make_box(0, 0, 0, 20.0, 10.0, 5.0)

@@ -1,6 +1,7 @@
 import math
 import hashlib
 import random
+import time
 import numpy as np
 from stl import mesh as stl_mesh
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QSizePolicy
@@ -60,23 +61,33 @@ class Viewport3D(QWidget):
         self.pour_rate: float  = 1.0
         self._anim_frac: float = 0.0
         self._anim_timer       = QTimer()
+        self._anim_timer.setSingleShot(True)   # restarts after render, prevents queue buildup
         self._anim_timer.timeout.connect(self._anim_tick)
         self._anim_done_cb     = None
-        self._anim_steps       = 40
+        self._anim_steps       = 120
         self._anim_step        = 0
 
 
         self._solidify_frac: float = 0.0
         self._solidify_timer     = QTimer()
+        self._solidify_timer.setSingleShot(True)   # restarts after render, prevents queue buildup
         self._solidify_timer.timeout.connect(self._solidify_tick)
         self._solidify_done_cb   = None
-        self._solidify_steps     = 60
+        self._solidify_steps     = 120
         self._solidify_step      = 0
 
 
         self._dragging_part    = None
         self._drag_last        = None
         self._zoom_factor      = 1.0
+
+        # Gating geometry cache — rebuilt only when params change
+        self._gating_geo_cache: dict  = {}
+        self._gating_cache_key: tuple = ()
+
+        # Animation interval stored for single-shot timer restarts
+        self._anim_interval_ms:     int = 25
+        self._solidify_interval_ms: int = 25
 
 
         # Setup rendering backend
@@ -596,79 +607,99 @@ class Viewport3D(QWidget):
 
     def _draw_gating(self, z_part: float):
 
-        """Draw 3D gating geometry into the current axes."""
+        """Draw 3D gating geometry into the current axes, using a geometry cache.
+
+        Mesh generation and shading are skipped when the gating configuration and
+        positional parameters have not changed since the last draw (e.g. during
+        fill animation where gating is static).
+        """
 
         if not self.models:
             return
         from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-
         _, _, _, _, _, zmax = self._compute_bounds()
-        top_z = zmax + 100
 
+        # Build a lightweight key from every param that affects gating geometry.
+        cache_key = (
+            tuple(sorted(self.gating)),
+            round(z_part, 2),
+            round(float(zmax), 2),
+            tuple(float(v) for v in self.sprue_offset),
+            round(self.runner_y_offset, 2),
+            tuple(float(v) for v in self.riser_offset),
+            self.sprue_top_radius,
+            self.sprue_bottom_radius,
+        )
+        if cache_key != self._gating_cache_key:
+            self._gating_geo_cache.clear()
+            self._gating_cache_key = cache_key
 
+        def _get(key, builder):
+            """Return cached (faces, colors) or compute and cache."""
+            if key not in self._gating_geo_cache:
+                self._gating_geo_cache[key] = builder()
+            return self._gating_geo_cache[key]
 
         # --- Tapered Sprue ---
-
         if "Tapered Sprue" in self.gating:
             sx, sy = self.sprue_offset
-            faces = self._make_cylinder_mesh(
-                cx=sx, cy=sy, z_bottom=zmax,
-                r_bottom=self.sprue_bottom_radius,
-                r_top=self.sprue_top_radius,
-                height=100.0, sides=24
-            )
-            sprue_rgb = self._hex_to_rgb(SPRUE_COLOR)
-            colors = self._shade_faces(faces, sprue_rgb, alpha=0.85)
+            def _build_sprue():
+                faces = self._make_cylinder_mesh(
+                    cx=sx, cy=sy, z_bottom=zmax,
+                    r_bottom=self.sprue_bottom_radius,
+                    r_top=self.sprue_top_radius,
+                    height=100.0, sides=24,
+                )
+                colors = self._shade_faces(faces, self._hex_to_rgb(SPRUE_COLOR), alpha=0.85)
+                return faces, colors
+            faces, colors = _get("sprue", _build_sprue)
             self.ax.add_collection3d(Poly3DCollection(
                 faces, facecolors=colors[:, :3], edgecolor="none", shade=True
             ))
 
-
-
         # --- Runner ---
-
         if "Runner (Horizontal)" in self.gating:
             sx, sy = self.sprue_offset
             ry = sy + self.runner_y_offset
-            faces = self._make_box_mesh(
-                cx=sx, cy=ry, z_bottom=z_part - 4.0,
-                width=160.0, depth=10.0, height=8.0
-            )
-            runner_rgb = self._hex_to_rgb(RUNNER_COLOR)
-            colors = self._shade_faces(faces, runner_rgb, alpha=0.85)
+            def _build_runner():
+                faces = self._make_box_mesh(
+                    cx=sx, cy=ry, z_bottom=z_part - 4.0,
+                    width=160.0, depth=10.0, height=8.0,
+                )
+                colors = self._shade_faces(faces, self._hex_to_rgb(RUNNER_COLOR), alpha=0.85)
+                return faces, colors
+            faces, colors = _get("runner", _build_runner)
             self.ax.add_collection3d(Poly3DCollection(
                 faces, facecolors=colors[:, :3], edgecolor="none", shade=True
             ))
-
-
 
         # --- Riser ---
-
         if "Riser (Open)" in self.gating:
             rx, ry = self.riser_offset
-            faces = self._make_cylinder_mesh(
-                cx=rx, cy=ry, z_bottom=z_part,
-                r_bottom=20.0, r_top=20.0, height=60.0, sides=24
-            )
-            riser_rgb = self._hex_to_rgb(RISER_COLOR)
-            colors = self._shade_faces(faces, riser_rgb, alpha=0.75)
+            def _build_riser():
+                faces = self._make_cylinder_mesh(
+                    cx=rx, cy=ry, z_bottom=z_part,
+                    r_bottom=20.0, r_top=20.0, height=60.0, sides=24,
+                )
+                colors = self._shade_faces(faces, self._hex_to_rgb(RISER_COLOR), alpha=0.75)
+                return faces, colors
+            faces, colors = _get("riser", _build_riser)
             self.ax.add_collection3d(Poly3DCollection(
                 faces, facecolors=colors[:, :3], edgecolor="none", shade=True
             ))
 
-
-
         # --- Fan Gate ---
-
         if "Fan Gate" in self.gating:
             sx, sy = self.sprue_offset
-            faces = self._make_box_mesh(
-                cx=sx, cy=sy - 4.0, z_bottom=z_part - 3.0,
-                width=60.0, depth=8.0, height=6.0
-            )
-            gate_rgb = self._hex_to_rgb(GATE_COLOR)
-            colors = self._shade_faces(faces, gate_rgb, alpha=0.85)
+            def _build_gate():
+                faces = self._make_box_mesh(
+                    cx=sx, cy=sy - 4.0, z_bottom=z_part - 3.0,
+                    width=60.0, depth=8.0, height=6.0,
+                )
+                colors = self._shade_faces(faces, self._hex_to_rgb(GATE_COLOR), alpha=0.85)
+                return faces, colors
+            faces, colors = _get("gate", _build_gate)
             self.ax.add_collection3d(Poly3DCollection(
                 faces, facecolors=colors[:, :3], edgecolor="none", shade=True
             ))
@@ -677,48 +708,30 @@ class Viewport3D(QWidget):
 
     def _draw_sprue_particles(self, z_part: float, anim_frac: float):
 
-        """Draw particle stream from sprue during fill animation.
+        """Draw particle stream from sprue during fill animation (single batch scatter).
 
-        Emits 15-20 small scatter points within 20mm radius of the sprue position
-        using random offsets seeded by anim_frac.
         Args:
             z_part: Parting line z coordinate
             anim_frac: Animation fraction (0.0 to 1.0) controlling particle emission
         """
 
-        if not self.models:
-            return
-        # Only draw particles when sprue is active in gating
-        if "Tapered Sprue" not in self.gating:
-            return
-        if anim_frac <= 0:
+        if not self.models or "Tapered Sprue" not in self.gating or anim_frac <= 0:
             return
         sx, sy = self.sprue_offset
         _, _, _, _, zmin, zmax = self._compute_bounds()
         top_z = zmax + 100
-        # Generate particles based on animation fraction
+
         np.random.seed(int(anim_frac * 1000) % 1000)
-        n_particles = int(15 + anim_frac * 5)  # 15-20 particles
-        z_bottom = zmin
-        for i in range(n_particles):
-            # Compute particle position along sprue height
-            z_pos = z_bottom + anim_frac * (top_z - z_bottom)
-            # Random offset within 20mm radius (decreasing toward bottom)
-            r_max = 20.0 * (1.0 - anim_frac * 0.5)  # 20mm at top, 10mm at bottom
-            theta = np.random.uniform(0, 2 * np.pi)
-            r = np.random.uniform(0, r_max)
-            x_offset = r * np.cos(theta)
-            y_offset = r * np.sin(theta)
-            # Particle size decreases as it flows down
-            particle_size = 1.5 + anim_frac * 2.0
-            self.ax.scatter(
-                sx + x_offset,
-                sy + y_offset,
-                z_pos - (1.0 - anim_frac) * 20,
-                c='orange',
-                s=particle_size,
-                alpha=0.9
-            )
+        n_particles = int(15 + anim_frac * 5)
+        r_max = 20.0 * (1.0 - anim_frac * 0.5)
+        theta = np.random.uniform(0, 2 * np.pi, n_particles)
+        r     = np.random.uniform(0, r_max,     n_particles)
+        xs = sx + r * np.cos(theta)
+        ys = sy + r * np.sin(theta)
+        z_pos = zmin + anim_frac * (top_z - zmin) - (1.0 - anim_frac) * 20
+        zs = np.full(n_particles, z_pos)
+        particle_size = 1.5 + anim_frac * 2.0
+        self.ax.scatter(xs, ys, zs, c="orange", s=particle_size, alpha=0.9)
 
 
 
@@ -726,42 +739,39 @@ class Viewport3D(QWidget):
 
         """Draw particle stream from sprue during fill animation - PyVista version.
 
+        Uses a single PolyData point cloud instead of one sphere mesh per particle.
+
         Args:
             z_part: Parting line z coordinate
             anim_frac: Animation fraction (0.0 to 1.0) controlling particle emission
         """
 
-        if not self.models:
-            return
-        # Only draw particles when sprue is active in gating
-        if "Tapered Sprue" not in self.gating:
-            return
-        if anim_frac <= 0:
+        if not self.models or "Tapered Sprue" not in self.gating or anim_frac <= 0:
             return
         sx, sy = self.sprue_offset
         _, _, _, _, zmin, zmax = self._compute_bounds()
         top_z = zmax + 100
-        # Generate particles based on animation fraction
+
         np.random.seed(int(anim_frac * 1000) % 1000)
-        n_particles = int(15 + anim_frac * 5)  # 15-20 particles
-        for i in range(n_particles):
-            # Compute particle position along sprue height
-            z_pos = zmin + anim_frac * (top_z - zmin)
-            # Random offset within 20mm radius (decreasing toward bottom)
-            r_max = 20.0 * (1.0 - anim_frac * 0.5)  # 20mm at top, 10mm at bottom
-            theta = np.random.uniform(0, 2 * np.pi)
-            r = np.random.uniform(0, r_max)
-            x_offset = sx + r * np.cos(theta)
-            y_offset = sy + r * np.sin(theta)
-            z_pos -= (1.0 - anim_frac) * 20
-            # Create sphere mesh for each particle
-            particle_size = 1.5 + anim_frac * 2.0
-            sphere = pv.Sphere(radius=particle_size, center=(x_offset, y_offset, z_pos))
-            self.plotter.add_mesh(
-                sphere,
-                color="orange",
-                opacity=min(0.9, 0.5 + anim_frac)
-            )
+        n_particles = int(15 + anim_frac * 5)
+        r_max = 20.0 * (1.0 - anim_frac * 0.5)
+        theta = np.random.uniform(0, 2 * np.pi, n_particles)
+        r     = np.random.uniform(0, r_max,     n_particles)
+        xs = sx + r * np.cos(theta)
+        ys = sy + r * np.sin(theta)
+        z_pos = zmin + anim_frac * (top_z - zmin) - (1.0 - anim_frac) * 20
+        zs = np.full(n_particles, z_pos)
+
+        points = np.column_stack([xs, ys, zs])
+        cloud  = pv.PolyData(points)
+        particle_size = 1.5 + anim_frac * 2.0
+        self.plotter.add_mesh(
+            cloud,
+            color="orange",
+            point_size=particle_size * 4,
+            render_points_as_spheres=True,
+            opacity=min(0.9, 0.5 + anim_frac),
+        )
 
 
 
@@ -966,18 +976,18 @@ class Viewport3D(QWidget):
 
         """Generate a rectangular box as triangle faces."""
 
-        hw, hd, hh = width / 2, depth / 2, height / 2
+        hw, hd = width / 2, depth / 2
 
 
         corners = np.array([
-            [-hw, -hd, -hh],
-            [ hw, -hd, -hh],
-            [ hw,  hd, -hh],
-            [-hw,  hd, -hh],
-            [-hw, -hd,  hh],
-            [ hw, -hd,  hh],
-            [ hw,  hd,  hh],
-            [-hw,  hd,  hh],
+            [cx - hw, cy - hd, z_bottom],
+            [cx + hw, cy - hd, z_bottom],
+            [cx + hw, cy + hd, z_bottom],
+            [cx - hw, cy + hd, z_bottom],
+            [cx - hw, cy - hd, z_bottom + height],
+            [cx + hw, cy - hd, z_bottom + height],
+            [cx + hw, cy + hd, z_bottom + height],
+            [cx - hw, cy + hd, z_bottom + height],
         ])
 
 
@@ -1287,12 +1297,11 @@ class Viewport3D(QWidget):
 
 
     def start_fill_animation(self, duration_s: float = 3.0, on_done: "callable | None" = None) -> None:
-        self._anim_done_cb = on_done
-        self._anim_step    = 0
-        self._anim_steps   = 40
-        interval_ms        = int((duration_s * 1000) / self._anim_steps)
-        interval_ms        = max(16, int(interval_ms / self.pour_rate))
-        self._anim_timer.start(interval_ms)
+        self._anim_done_cb     = on_done
+        self._anim_step        = 0
+        self._anim_steps       = 120
+        self._anim_interval_ms = max(16, int((duration_s * 1000) / self._anim_steps / self.pour_rate))
+        self._anim_timer.start(self._anim_interval_ms)
 
 
 
@@ -1301,10 +1310,13 @@ class Viewport3D(QWidget):
         self._anim_frac  = self._anim_step / self._anim_steps
         self.render(self._anim_frac)
         if self._anim_step >= self._anim_steps:
-            self._anim_timer.stop()
             self._anim_frac = 0.0
             # Start solidification animation
             self.start_solidify_animation(duration_s=3.0, on_done=self._anim_done_cb)
+        else:
+            # Single-shot: restart only after render completes; naturally skips
+            # frames when the GPU/CPU render takes longer than the target interval.
+            self._anim_timer.start(self._anim_interval_ms)
 
 
 
@@ -1312,11 +1324,11 @@ class Viewport3D(QWidget):
 
         """Start solidification animation - boundary moves inward from mold walls."""
 
-        self._solidify_done_cb = on_done
-        self._solidify_step    = 0
-        self._solidify_steps   = 60
-        interval_ms            = int((duration_s * 1000) / self._solidify_steps)
-        self._solidify_timer.start(interval_ms)
+        self._solidify_done_cb     = on_done
+        self._solidify_step        = 0
+        self._solidify_steps       = 120
+        self._solidify_interval_ms = max(16, int((duration_s * 1000) / self._solidify_steps))
+        self._solidify_timer.start(self._solidify_interval_ms)
 
 
 
@@ -1328,10 +1340,12 @@ class Viewport3D(QWidget):
         self._solidify_frac  = self._solidify_step / self._solidify_steps
         self.render(max(self._anim_frac, self._solidify_frac))
         if self._solidify_step >= self._solidify_steps:
-            self._solidify_timer.stop()
             self._solidify_frac = 0.0
             if self._solidify_done_cb:
                 self._solidify_done_cb()
+        else:
+            # Single-shot: restart only after render completes.
+            self._solidify_timer.start(self._solidify_interval_ms)
 
 
 
