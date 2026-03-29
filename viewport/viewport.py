@@ -3,6 +3,7 @@ import hashlib
 import random
 import time
 import numpy as np
+import matplotlib.cm as _cm
 from stl import mesh as stl_mesh
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QSizePolicy
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
@@ -19,7 +20,28 @@ except ImportError:
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
     from matplotlib.figure import Figure
 from constants import (COPE_COLOR, DRAG_COLOR, SPRUE_COLOR, RUNNER_COLOR,
-                       GATE_COLOR, RISER_COLOR, MODEL_COLORS)
+                       GATE_COLOR, RISER_COLOR, MODEL_COLORS, METAL_PBR)
+
+# Optional GPU array backend (falls back to NumPy transparently)
+try:
+    import cupy as cp
+    _CUPY_AVAILABLE = True
+except ImportError:
+    cp = None
+    _CUPY_AVAILABLE = False
+xp = cp if _CUPY_AVAILABLE else np
+
+# Pre-built 256-entry plasma LUT for GPU-friendly heat color lookup
+_PLASMA_LUT: np.ndarray = _cm.plasma(np.linspace(0, 1, 256))[:, :3].astype(np.float32)
+
+# Normalised light directions and strengths for Phong shading (vectorised)
+_LIGHT_DIRS = np.array([
+    [0.5,  0.8,  1.0],
+    [-0.3, 0.2,  0.5],
+    [0.8, -0.4, -0.1],
+], dtype=np.float64)
+_LIGHT_DIRS /= np.linalg.norm(_LIGHT_DIRS, axis=1, keepdims=True)
+_LIGHT_STRENGTHS = np.array([0.7, 0.25, 0.15], dtype=np.float64)
 
 
 class Viewport3D(QWidget):
@@ -81,7 +103,10 @@ class Viewport3D(QWidget):
         self._drag_last        = None
         self._zoom_factor      = 1.0
 
-        # Gating geometry cache — rebuilt only when params change
+        # Active metal name — drives PBR material selection in PyVista renderer
+        self.active_metal: str = "A356 Aluminum"
+
+        # Gating geometry cache — rebuilt only when params change (both backends)
         self._gating_geo_cache: dict  = {}
         self._gating_cache_key: tuple = ()
 
@@ -89,6 +114,16 @@ class Viewport3D(QWidget):
         self._anim_interval_ms:     int = 25
         self._solidify_interval_ms: int = 25
 
+        # PyVista incremental actor management
+        self._pv_actors:          dict  = {}   # name -> {model, fill}
+        self._pv_flask_actors:    list  = []
+        self._pv_flask_key:       tuple = ()
+        self._pv_gating_actors:   list  = []
+        self._pv_gating_key:      tuple = ()
+        self._pv_particle_actors: list  = []
+
+        # Matplotlib persistent model collections (Phase 4b)
+        self._mpl_model_collections: dict = {}   # name -> {cope, drag}
 
         # Setup rendering backend
         self.setup_renderer()
@@ -108,6 +143,26 @@ class Viewport3D(QWidget):
                 self.use_pyvista = True
                 self.plotter = BackgroundPlotter(show=False)
                 self.render_frame = self.plotter.app_window
+                # --- Visual quality settings (set once at startup) ---
+                try:
+                    self.plotter.enable_ssao(radius=0.5, bias=0.025, kernel_size=32)
+                except Exception:
+                    pass
+                try:
+                    self.plotter.enable_shadows()
+                except Exception:
+                    pass
+                # 3-point lighting rig: key / fill / rim
+                self.plotter.remove_all_lights()
+                self.plotter.add_light(pv.Light(position=(200, 200, 300),
+                                                focal_point=(0, 0, 0),
+                                                intensity=0.75))
+                self.plotter.add_light(pv.Light(position=(-150, 100, 100),
+                                                focal_point=(0, 0, 0),
+                                                intensity=0.30))
+                self.plotter.add_light(pv.Light(position=(0, -200, 250),
+                                                focal_point=(0, 0, 0),
+                                                intensity=0.15))
                 return
             except Exception:
                 pass
@@ -123,6 +178,7 @@ class Viewport3D(QWidget):
         )
         self.canvas.updateGeometry()
         self.ax = fig.add_subplot(111, projection="3d")
+        self._style_axes()   # style once at setup, not on every frame
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.canvas)
@@ -231,9 +287,18 @@ class Viewport3D(QWidget):
             vectors = vectors[::step]
 
         loaded.vectors = vectors
+
+        # Pre-compute unit face normals for shading (Phase 4a — avoids per-frame recompute)
+        _v0, _v1, _v2 = vectors[:, 0], vectors[:, 1], vectors[:, 2]
+        _cross = np.cross(_v1 - _v0, _v2 - _v0).astype(np.float64)
+        _lens = np.linalg.norm(_cross, axis=1, keepdims=True)
+        _lens[_lens == 0] = 1e-9
+        _cross /= _lens
+
         self.models[name] = {
             "mesh":        loaded,
             "render_data": vectors,
+            "normals":     _cross,   # unit face normals in local space (n, 3)
         }
         self.transforms[name] = {
             "offset":   np.array([0.0, 0.0, 0.0]),
@@ -259,18 +324,18 @@ class Viewport3D(QWidget):
 
     def _geometry_stats(self, mesh) -> dict:
 
-        """Volume via divergence theorem, surface area from triangle cross-products."""
+        """Volume via divergence theorem, surface area from triangle cross-products.
 
-        verts = mesh.vectors
+        Uses GPU arrays (CuPy) when available, falls back to NumPy automatically.
+        """
+
+        verts = xp.asarray(mesh.vectors)
         v0, v1, v2 = verts[:, 0], verts[:, 1], verts[:, 2]
 
+        cross   = xp.cross(v1 - v0, v2 - v0)
+        vol_mm3 = float(abs(xp.sum(v0 * cross) / 6.0))
 
-        cross = np.cross(v1 - v0, v2 - v0)
-        vol_mm3 = abs(np.sum(v0 * cross) / 6.0)
-
-
-        area_mm2 = np.sum(np.linalg.norm(cross, axis=1)) / 2.0
-
+        area_mm2 = float(xp.sum(xp.linalg.norm(cross, axis=1)) / 2.0)
 
         return {
             "vol_cm3":  vol_mm3  / 1000.0,
@@ -338,106 +403,98 @@ class Viewport3D(QWidget):
 
     def _render_matplotlib(self, anim_frac: float = 0.0):
 
-        """Render using matplotlib backend."""
+        """Render using matplotlib backend.
 
-        self.ax.cla()
-        self._style_axes()
+        Persistent model Poly3DCollections are kept alive across frames and
+        updated in-place; only overlay artists (flask outline, gating, particles,
+        fill animation) are cleared and re-added each frame, avoiding ax.cla().
+        """
 
+        # Clear overlay artists (flask, gating, fill overlay, particles)
+        # keeping persistent model collections intact
+        self._clear_mpl_overlays()
 
         xmin, xmax, ymin, ymax, zmin, zmax = self._compute_bounds()
         part_h = max(zmax - zmin, 1.0)
         z_part  = zmin + part_h * self.parting_z
 
-
-        PAD = 76.0
+        PAD   = 76.0
         fw_mm = self.flask_size[0] * 25.4
         fh_mm = self.flask_size[1] * 25.4
 
+        cope_base = self._hex_to_rgb(COPE_COLOR)
+        drag_base = self._hex_to_rgb(DRAG_COLOR)
+
+        # Remove persistent collections for models that have been deleted
+        for name in list(self._mpl_model_collections):
+            if name not in self.models:
+                for coll in self._mpl_model_collections[name].values():
+                    if coll is not None:
+                        try:
+                            coll.remove()
+                        except Exception:
+                            pass
+                del self._mpl_model_collections[name]
 
         for name, data in self.models.items():
-            t   = self.transforms[name]
-            off = t["offset"]
-            rot = math.radians(t["rotation"])
-
-
-            verts = data["render_data"].copy()
-
-
-            cos_r, sin_r = math.cos(rot), math.sin(rot)
-            x_rot = verts[:, :, 0] * cos_r - verts[:, :, 1] * sin_r
-            y_rot = verts[:, :, 0] * sin_r + verts[:, :, 1] * cos_r
-            verts[:, :, 0] = x_rot
-            verts[:, :, 1] = y_rot
-
-
-            verts[:, :, 0] += off[0]
-            verts[:, :, 1] += off[1]
-            verts[:, :, 2] += off[2]
-
-
+            verts       = self._apply_transform(data["render_data"], self.transforms[name])
             centroids_z = verts[:, :, 2].mean(axis=1)
             cope_mask   = centroids_z >= z_part
+            cope_verts  = verts[cope_mask]
+            drag_verts  = verts[~cope_mask]
 
+            cope_colors = [cope_base + (1.0,)] * len(cope_verts)
+            drag_colors = [drag_base + (1.0,)] * len(drag_verts)
 
-            base_hex = (COPE_COLOR if np.sum(cope_mask) > len(cope_mask) // 2
-                        else self._get_color_for_model(name))
+            if name not in self._mpl_model_collections:
+                # First render of this model: create collections
+                cope_coll = drag_coll = None
+                if len(cope_verts):
+                    cope_coll = Poly3DCollection(cope_verts, facecolors=cope_colors,
+                                                 edgecolors="none", linewidths=0, shade=True)
+                    self.ax.add_collection3d(cope_coll)
+                if len(drag_verts):
+                    drag_coll = Poly3DCollection(drag_verts, facecolors=drag_colors,
+                                                 edgecolors="none", linewidths=0, shade=True)
+                    self.ax.add_collection3d(drag_coll)
+                self._mpl_model_collections[name] = {"cope": cope_coll, "drag": drag_coll}
+            else:
+                # Update existing collections in-place (avoids add_collection3d overhead)
+                colls = self._mpl_model_collections[name]
+                if colls["cope"] is not None and len(cope_verts):
+                    colls["cope"].set_verts(cope_verts)
+                    colls["cope"].set_facecolor(cope_colors)
+                if colls["drag"] is not None and len(drag_verts):
+                    colls["drag"].set_verts(drag_verts)
+                    colls["drag"].set_facecolor(drag_colors)
 
-
-            cope_base = self._hex_to_rgb(COPE_COLOR)
-            drag_base = self._hex_to_rgb(DRAG_COLOR)
-
-
-            if np.any(cope_mask):
-                n_faces = int(cope_mask.sum())
-                if n_faces > 0:
-                    face_colors = [cope_base + (1.0,)] * n_faces
-                    self.ax.add_collection3d(
-                        Poly3DCollection(verts[cope_mask], facecolors=face_colors,
-                                         edgecolors="none", linewidths=0, shade=True))
-
-
-            if np.any(~cope_mask):
-                n_faces = int((~cope_mask).sum())
-                if n_faces > 0:
-                    face_colors = [drag_base + (1.0,)] * n_faces
-                    self.ax.add_collection3d(
-                        Poly3DCollection(verts[~cope_mask], facecolors=face_colors,
-                                         edgecolors="none", linewidths=0, shade=True))
-
-
-            if anim_frac > 0 and np.any(~cope_mask):
-                fill_z = zmin + part_h * anim_frac
+            # Fill animation overlay (always an overlay; plasma heat colours)
+            if anim_frac > 0:
+                fill_z    = zmin + part_h * anim_frac
                 fill_mask = centroids_z <= fill_z
                 if np.any(fill_mask):
-                    # Use heat colors based on fill animation
                     heat_colors = self._compute_heat_colors(verts, anim_frac)
-                    fill_colors = heat_colors[fill_mask]
                     self.ax.add_collection3d(
                         Poly3DCollection(verts[fill_mask],
-                                         facecolors=fill_colors,
+                                         facecolors=heat_colors[fill_mask],
                                          edgecolors="none"))
-
 
         self._draw_flask_outline(z_part)
 
-
         if self.models:
             self._draw_gating(z_part)
-            # Draw sprue particles during fill animation
             if anim_frac > 0 and "Tapered Sprue" in self.gating:
                 self._draw_sprue_particles(z_part, anim_frac)
-
 
         half_w = fw_mm / 2 + PAD
         half_h = fh_mm / 2 + PAD
         cx = half_w / self._zoom_factor
         cy = half_h / self._zoom_factor
         z_center = (zmin + zmax) / 2
-        z_range = ((zmax + 120) - (zmin - 20)) / 2 / self._zoom_factor
+        z_range  = ((zmax + 120) - (zmin - 20)) / 2 / self._zoom_factor
         self.ax.set_xlim(-cx, cx)
         self.ax.set_ylim(-cy, cy)
         self.ax.set_zlim(z_center - z_range, z_center + z_range)
-
 
         self.canvas.draw_idle()
 
@@ -449,97 +506,123 @@ class Viewport3D(QWidget):
 
         """Render using PyVista backend with PBR materials."""
 
-        self.plotter.clear()
-
-
         xmin, xmax, ymin, ymax, zmin, zmax = self._compute_bounds()
         part_h = max(zmax - zmin, 1.0)
         z_part  = zmin + part_h * self.parting_z
 
-
-        # Set camera view
-        center = [(xmin+xmax)/2, (ymin+ymax)/2, (zmin+zmax)/2]
-        dist = max(xmax-xmin, ymax-ymin, zmax-zmin) * 1.5
-        self.plotter.camera_position = 'isometric'
-
-
-        # Add models with PBR materials
+        # ----------------------------------------------------------------
+        # 1. Sync model actors — create for new models, remove for deleted
+        # ----------------------------------------------------------------
         for name, data in self.models.items():
-            t   = self.transforms[name]
-            off = t["offset"]
-            rot = math.radians(t["rotation"])
+            if name not in self._pv_actors:
+                raw = data["render_data"]
+                n   = len(raw)
+                faces = np.hstack([np.full((n, 1), 3),
+                                   np.arange(n * 3).reshape(-1, 3)])
+                mesh  = PolyData(raw.reshape(-1, 3), faces.flatten())
+                pbr   = METAL_PBR.get(self.active_metal, {
+                    "color": list(self._hex_to_rgb(self._get_color_for_model(name))),
+                    "metallic": 0.70, "roughness": 0.30,
+                })
+                actor = self.plotter.add_mesh(mesh, smooth_shading=True, **pbr)
+                self._pv_actors[name] = {"model": actor, "fill": None}
 
+        for name in list(self._pv_actors):
+            if name not in self.models:
+                self.plotter.remove_actor(self._pv_actors[name]["model"])
+                if self._pv_actors[name]["fill"]:
+                    self.plotter.remove_actor(self._pv_actors[name]["fill"])
+                del self._pv_actors[name]
 
-            verts = data["render_data"].copy()
-            cos_r, sin_r = math.cos(rot), math.sin(rot)
-            x_rot = verts[:, :, 0] * cos_r - verts[:, :, 1] * sin_r
-            y_rot = verts[:, :, 0] * sin_r + verts[:, :, 1] * cos_r
-            verts[:, :, 0] = x_rot
-            verts[:, :, 1] = y_rot
-            verts[:, :, 0] += off[0]
-            verts[:, :, 1] += off[1]
-            verts[:, :, 2] += off[2]
+        # ----------------------------------------------------------------
+        # 2. Update transform matrices (no vertex copy — GPU-side transform)
+        # ----------------------------------------------------------------
+        for name in self.models:
+            if name in self._pv_actors:
+                self._pv_actors[name]["model"].user_matrix = (
+                    self._build_user_matrix(self.transforms[name])
+                )
 
+        # ----------------------------------------------------------------
+        # 3. Fill animation overlay — remove old, add new
+        # ----------------------------------------------------------------
+        for info in self._pv_actors.values():
+            if info["fill"]:
+                self.plotter.remove_actor(info["fill"])
+                info["fill"] = None
 
-            # Create mesh from vertices and faces
-            n_tris = len(verts)
-            faces = np.hstack([np.full((n_tris, 1), 3), 
-                              np.arange(n_tris * 3).reshape(-1, 3)])
-
-
-            mesh = PolyData(verts.reshape(-1, 3), faces.flatten())
-
-
-            # Get color for model
-            color_hex = self._get_color_for_model(name)
-            rgb = self._hex_to_rgb(color_hex)
-            base_color = [rgb[0], rgb[1], rgb[2]]
-
-
-            # Add mesh with PBR material
-            self.plotter.add_mesh(
-                mesh,
-                color=base_color,
-                metallic=0.3,
-                roughness=0.5,
-                smooth_shading=True,
-            )
-
-
-
-            # Add heat-colored metal fill triangles if animating
-            if anim_frac > 0:
+        if anim_frac > 0:
+            for name, data in self.models.items():
+                verts = self._apply_transform(data["render_data"], self.transforms[name])
                 heat_colors = self._compute_heat_colors(verts, anim_frac)
-                # Create a separate mesh for filled triangles only
                 centroids_z = verts[:, :, 2].mean(axis=1)
-                fill_z = zmin + part_h * anim_frac
-                fill_mask = centroids_z <= fill_z
-                if np.any(fill_mask) and fill_mask.sum() > 0:
-                    # Create sub-mesh with just filled triangles
-                    filled_verts = verts[fill_mask].reshape(-1, 3)
-                    n_filled = len(verts[fill_mask])
-                    filled_faces = np.hstack([np.full((n_filled, 1), 3),
-                                             np.arange(n_filled * 3).reshape(-1, 3)])
-                    fill_mesh = PolyData(filled_verts, filled_faces.flatten())
-                    # Add with vertex colors
-                    self.plotter.add_mesh(
-                        fill_mesh,
+                fill_z      = zmin + part_h * anim_frac
+                fill_mask   = centroids_z <= fill_z
+                if fill_mask.sum() > 0:
+                    fv     = verts[fill_mask]
+                    n_f    = len(fv)
+                    ff     = np.hstack([np.full((n_f, 1), 3),
+                                        np.arange(n_f * 3).reshape(-1, 3)])
+                    fmesh  = PolyData(fv.reshape(-1, 3), ff.flatten())
+                    factor = self.plotter.add_mesh(
+                        fmesh,
                         scalars=heat_colors[fill_mask][:, :3],
                         rgb=True,
                         smooth_shading=True,
                     )
-        # Draw flask outline
-        self._draw_flask_outline_pv(z_part)
+                    self._pv_actors[name]["fill"] = factor
 
+        # ----------------------------------------------------------------
+        # 4. Flask outline — cached, rebuild only when bounds/size change
+        # ----------------------------------------------------------------
+        flask_key = (round(zmin, 1), round(zmax, 1), self.flask_size,
+                     round(z_part, 1))
+        if flask_key != self._pv_flask_key:
+            for a in self._pv_flask_actors:
+                self.plotter.remove_actor(a)
+            self._pv_flask_actors.clear()
+            self._pv_flask_key = flask_key
+            fw_mm = self.flask_size[0] * 25.4
+            fh_mm = self.flask_size[1] * 25.4
+            hw, hh = fw_mm / 2, fh_mm / 2
+            xs = [-hw, hw, hw, -hw, -hw]
+            ys = [-hh, -hh, hh, hh, -hh]
+            for z, col, lw in [(zmin - 5, "#45475A", 2),
+                                (zmax + 5, "#45475A", 2),
+                                (z_part,   "#89B4FA", 3)]:
+                pts  = np.column_stack([xs, ys, [z] * 5])
+                line = pv.PolyData(pts)
+                line.lines = np.array([len(xs), 0, 1, 2, 3, 4, 0])
+                self._pv_flask_actors.append(
+                    self.plotter.add_mesh(line, color=col, line_width=lw)
+                )
 
-        # Add sprue particles during fill animation (PyVista)
+        # ----------------------------------------------------------------
+        # 5. Gating actors — cached by config key, rebuild on change
+        # ----------------------------------------------------------------
+        gating_key = (
+            tuple(sorted(self.gating)),
+            round(z_part, 2), round(float(zmax), 2),
+            tuple(float(v) for v in self.sprue_offset),
+            round(self.runner_y_offset, 2),
+            tuple(float(v) for v in self.riser_offset),
+            self.sprue_top_radius, self.sprue_bottom_radius,
+        )
+        if gating_key != self._pv_gating_key:
+            for a in self._pv_gating_actors:
+                self.plotter.remove_actor(a)
+            self._pv_gating_actors.clear()
+            self._pv_gating_key = gating_key
+            self._build_pv_gating_actors(z_part, zmax)
+
+        # ----------------------------------------------------------------
+        # 6. Particle overlay — rebuild each frame (dynamic by design)
+        # ----------------------------------------------------------------
+        for a in self._pv_particle_actors:
+            self.plotter.remove_actor(a)
+        self._pv_particle_actors.clear()
         if anim_frac > 0 and "Tapered Sprue" in self.gating:
             self._draw_sprue_particles_pv(z_part, anim_frac)
-
-
-        # Add lighting
-        self.plotter.enable_lightkit()
-
 
         self.plotter.render()
 
@@ -604,6 +687,118 @@ class Viewport3D(QWidget):
         self.plotter.add_mesh(line, color="#89B4FA", line_width=3)
 
 
+
+    # ------------------------------------------------------------------
+    # New helper methods
+    # ------------------------------------------------------------------
+
+    def set_active_metal(self, name: str) -> None:
+        """Update the active metal; forces PyVista model actors to recreate
+        with the new per-metal PBR material on next render."""
+        if self.active_metal == name:
+            return
+        self.active_metal = name
+        if self.use_pyvista and self._pv_actors:
+            for info in self._pv_actors.values():
+                self.plotter.remove_actor(info["model"])
+                if info["fill"]:
+                    self.plotter.remove_actor(info["fill"])
+            self._pv_actors.clear()
+            self.render(self._anim_frac)
+
+    def _build_user_matrix(self, t: dict) -> np.ndarray:
+        """4×4 homogeneous transform (Z-rotation + XYZ offset) for PyVista actors."""
+        off = t["offset"]
+        rot = math.radians(t["rotation"])
+        cos_r, sin_r = math.cos(rot), math.sin(rot)
+        mat = np.eye(4, dtype=np.float64)
+        mat[0, 0], mat[0, 1] =  cos_r, -sin_r
+        mat[1, 0], mat[1, 1] =  sin_r,  cos_r
+        mat[0, 3], mat[1, 3], mat[2, 3] = float(off[0]), float(off[1]), float(off[2])
+        return mat
+
+    def _apply_transform(self, render_data: np.ndarray, t: dict) -> np.ndarray:
+        """Return world-space vertex array by applying rotation + offset."""
+        verts = render_data.copy()
+        off = t["offset"]
+        rot = math.radians(t["rotation"])
+        cos_r, sin_r = math.cos(rot), math.sin(rot)
+        x_new = verts[:, :, 0] * cos_r - verts[:, :, 1] * sin_r
+        y_new = verts[:, :, 0] * sin_r + verts[:, :, 1] * cos_r
+        verts[:, :, 0] = x_new + off[0]
+        verts[:, :, 1] = y_new + off[1]
+        verts[:, :, 2] += off[2]
+        return verts
+
+    def _clear_mpl_overlays(self) -> None:
+        """Remove all matplotlib artists except persistent model collections."""
+        persistent = {
+            id(c)
+            for colls in self._mpl_model_collections.values()
+            for c in colls.values()
+            if c is not None
+        }
+        for artist in list(self.ax.collections):
+            if id(artist) not in persistent:
+                artist.remove()
+        for line in list(self.ax.lines):
+            line.remove()
+        for text in list(self.ax.texts):
+            text.remove()
+
+    def _build_pv_gating_actors(self, z_part: float, zmax: float) -> None:
+        """Create PyVista mesh actors for all active gating components and
+        append them to self._pv_gating_actors."""
+        _gating_colors = {
+            "Tapered Sprue":       ("#FF6600", 0.80),
+            "Runner (Horizontal)": ("#B87333", 0.80),
+            "Fan Gate":            ("#FFBF00", 0.80),
+            "Riser (Open)":        ("#C0C0C0", 0.70),
+        }
+        if "Tapered Sprue" in self.gating:
+            sx, sy = self.sprue_offset
+            faces = self._make_cylinder_mesh(
+                cx=sx, cy=sy, z_bottom=zmax,
+                r_bottom=self.sprue_bottom_radius,
+                r_top=self.sprue_top_radius,
+                height=100.0, sides=24,
+            )
+            self._add_pv_gating_mesh(faces, *_gating_colors["Tapered Sprue"])
+
+        if "Runner (Horizontal)" in self.gating:
+            sx, sy = self.sprue_offset
+            ry = sy + self.runner_y_offset
+            faces = self._make_box_mesh(
+                cx=sx, cy=ry, z_bottom=z_part - 4.0,
+                width=160.0, depth=10.0, height=8.0,
+            )
+            self._add_pv_gating_mesh(faces, *_gating_colors["Runner (Horizontal)"])
+
+        if "Riser (Open)" in self.gating:
+            rx, ry = self.riser_offset
+            faces = self._make_cylinder_mesh(
+                cx=rx, cy=ry, z_bottom=z_part,
+                r_bottom=20.0, r_top=20.0, height=60.0, sides=24,
+            )
+            self._add_pv_gating_mesh(faces, *_gating_colors["Riser (Open)"])
+
+        if "Fan Gate" in self.gating:
+            sx, sy = self.sprue_offset
+            faces = self._make_box_mesh(
+                cx=sx, cy=sy - 4.0, z_bottom=z_part - 3.0,
+                width=60.0, depth=8.0, height=6.0,
+            )
+            self._add_pv_gating_mesh(faces, *_gating_colors["Fan Gate"])
+
+    def _add_pv_gating_mesh(self, faces: np.ndarray, color: str,
+                             opacity: float) -> None:
+        """Convert a triangle-face array to PolyData and add to the plotter."""
+        n = len(faces)
+        pv_faces = np.hstack([np.full((n, 1), 3), np.arange(n * 3).reshape(-1, 3)])
+        mesh  = PolyData(faces.reshape(-1, 3), pv_faces.flatten())
+        actor = self.plotter.add_mesh(mesh, color=color, opacity=opacity,
+                                      smooth_shading=True)
+        self._pv_gating_actors.append(actor)
 
     def _draw_gating(self, z_part: float):
 
@@ -765,13 +960,14 @@ class Viewport3D(QWidget):
         points = np.column_stack([xs, ys, zs])
         cloud  = pv.PolyData(points)
         particle_size = 1.5 + anim_frac * 2.0
-        self.plotter.add_mesh(
+        actor = self.plotter.add_mesh(
             cloud,
             color="orange",
             point_size=particle_size * 4,
             render_points_as_spheres=True,
             opacity=min(0.9, 0.5 + anim_frac),
         )
+        self._pv_particle_actors.append(actor)
 
 
 
@@ -862,79 +1058,61 @@ class Viewport3D(QWidget):
 
     def _shade_faces(self, verts: np.ndarray, base_rgb, alpha: float = 1.0):
 
-        """Per-face Phong-style shading with key, fill, and rim lights."""
+        """Per-face Phong-style shading — 3-light rig, fully vectorised, GPU-ready."""
 
         v0, v1, v2 = verts[:, 0], verts[:, 1], verts[:, 2]
-        normals = np.cross(v1 - v0, v2 - v0).astype(float)
-        lengths = np.linalg.norm(normals, axis=1, keepdims=True)
+        normals = xp.asarray(np.cross(v1 - v0, v2 - v0).astype(np.float64))
+        lengths = xp.linalg.norm(normals, axis=1, keepdims=True)
         lengths[lengths == 0] = 1e-9
         normals /= lengths
 
-
-        lights = [
-            (np.array([0.5,  0.8, 1.0]),  0.7),
-            (np.array([-0.3, 0.2, 0.5]),  0.25),
-            (np.array([0.8, -0.4, -0.1]), 0.15),
-        ]
-        intensities = np.zeros(len(verts))
-        for light_dir, strength in lights:
-            ld = light_dir / np.linalg.norm(light_dir)
-            intensities += np.clip(normals @ ld, 0, 1) * strength
-        intensities = np.clip(intensities + 0.18, 0, 1)
-
+        # Vectorised 3-light dot products: (n, 3) @ (3, 3).T → (n, 3)
+        dots = xp.clip(normals @ xp.asarray(_LIGHT_DIRS.T), 0.0, 1.0)
+        intensities = xp.clip(dots @ xp.asarray(_LIGHT_STRENGTHS) + 0.18, 0.0, 1.0)
 
         br, bg, bb = base_rgb
-        colors = np.stack([
-            np.clip(br * intensities, 0, 1),
-            np.clip(bg * intensities, 0, 1),
-            np.clip(bb * intensities, 0, 1),
+        colors = np.column_stack([
+            np.clip(float(br) * np.asarray(intensities), 0, 1),
+            np.clip(float(bg) * np.asarray(intensities), 0, 1),
+            np.clip(float(bb) * np.asarray(intensities), 0, 1),
             np.full(len(verts), alpha),
-        ], axis=1)
+        ])
         return colors
 
     def _compute_heat_colors(self, verts: np.ndarray, anim_frac: float) -> np.ndarray:
-        """Compute per-triangle heat colors based on fill animation fraction.
+        """Compute per-triangle heat colours using the plasma LUT (GPU-ready).
 
-        Colors triangles by temperature state:
-        - Filled (z <= fill_level): #FFFFA0 (yellowish)
-        - Cooling (fill_level < z <= fill_level + margin): interpolated
-        - Solidified (z > fill_level + margin): #909090 (gray)
+        Molten metal (below fill level) → plasma bright yellow/orange.
+        Cooling zone (just above fill) → plasma red/orange fading to steel grey.
+        Solidified (well above fill) → steel grey.
+
         Args:
             verts: Triangle vertices array of shape (n_tris, 3, 3)
-            anim_frac: Animation fraction (0.0 to 1.0) representing fill level
+            anim_frac: Animation fraction (0.0–1.0) representing fill level
         Returns:
-            RGBA colors array of shape (n_tris, 4)
+            RGBA colour array of shape (n_tris, 4)
         """
-        # Compute centroid z for each triangle
         centroids_z = verts[:, :, 2].mean(axis=1)
-        # Define colors as RGB tuples
-        filled_color = np.array([1.0, 1.0, 0.631])   # #FFFFA0
-        cooling_color = np.array([1.0, 0.4, 0.0])     # #FF6600
-        solidified_color = np.array([0.565, 0.565, 0.565])  # #909090
-        # Normalize z range for coloring
-        z_min = centroids_z.min()
-        z_max = centroids_z.max()
+        z_min = float(centroids_z.min())
+        z_max = float(centroids_z.max())
         z_range = max(z_max - z_min, 1e-9)
-        # Calculate fill level in z coordinates
-        part_h = z_max - z_min
-        fill_z = z_min + part_h * anim_frac
-        # Compute relative position (0=below fill, 1=at top)
-        rel_pos = (centroids_z - fill_z) / z_range
-        # Vectorized color assignment
-        alpha = 0.85
-        t_clamp = np.clip(rel_pos / 0.1, 0.0, 1.0)  # 0=filled, 1=solidified
-        # Start with filled color broadcast to all rows
-        rgb = np.where(
-            rel_pos[:, None] <= 0,
-            filled_color,
-            np.where(
-                rel_pos[:, None] >= 0.1,
-                solidified_color,
-                cooling_color * (1 - t_clamp[:, None]) + solidified_color * t_clamp[:, None],
-            )
-        )
-        colors = np.concatenate([rgb, np.full((len(verts), 1), alpha)], axis=1)
-        return colors
+        fill_z  = z_min + (z_max - z_min) * anim_frac
+        rel_pos = (centroids_z - fill_z) / z_range   # <0 hot, >0 cooling/cold
+
+        # Plasma LUT lookup: hot=0.95 (yellow), cooling edge=0.30 (deep red)
+        _COOL_RANGE = 0.18
+        t = np.clip(rel_pos / _COOL_RANGE, 0.0, 1.0)   # 0=hot, 1=solid
+        lut_idx = np.clip(((0.95 - 0.30) * (1.0 - t) + 0.30) * 255,
+                          0, 255).astype(np.int32)
+        rgb = _PLASMA_LUT[lut_idx].astype(np.float64)   # (n, 3) from LUT
+
+        # Replace fully solidified triangles with steel grey
+        solidified_grey = np.array([0.62, 0.62, 0.65])
+        solid_mask = rel_pos > _COOL_RANGE
+        rgb[solid_mask] = solidified_grey
+
+        alpha = np.where(rel_pos <= 0, 0.92, 0.78)
+        return np.column_stack([rgb, alpha])
 
     # ------------------------------------------------------------------
 
@@ -1355,11 +1533,30 @@ class Viewport3D(QWidget):
 
         self._anim_timer.stop()
         self._solidify_timer.stop()
-        self._anim_frac = 0.0
-        self._solidify_frac = 0.0
-        self._anim_step = 0
-        self._solidify_step = 0
+        self._anim_frac      = 0.0
+        self._solidify_frac  = 0.0
+        self._anim_step      = 0
+        self._solidify_step  = 0
         self.models.clear()
         self.transforms.clear()
         self.active_model = ""
+
+        # Clear cached rendering state
+        self._gating_geo_cache.clear()
+        self._gating_cache_key = ()
+        self._mpl_model_collections.clear()
+        if self.use_pyvista:
+            for info in self._pv_actors.values():
+                self.plotter.remove_actor(info["model"])
+                if info["fill"]:
+                    self.plotter.remove_actor(info["fill"])
+            self._pv_actors.clear()
+            for a in self._pv_flask_actors + self._pv_gating_actors + self._pv_particle_actors:
+                self.plotter.remove_actor(a)
+            self._pv_flask_actors.clear()
+            self._pv_flask_key = ()
+            self._pv_gating_actors.clear()
+            self._pv_gating_key = ()
+            self._pv_particle_actors.clear()
+
         self._draw_idle_scene()

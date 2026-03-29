@@ -46,3 +46,17 @@ MODEL_COLORS = [
     "#BEC1D2", "#89DCEB", "#A6E3A1",
     "#FAB387", "#F38BA8", "#CBA6F7",
 ]
+
+# Per-metal PBR material settings for PyVista renderer
+METAL_PBR = {
+    "A356 Aluminum": {
+        "color": "#C8C8D0",   # cool silver
+        "metallic": 0.85,
+        "roughness": 0.25,
+    },
+    "Everdur Bronze (C52100)": {
+        "color": "#CD7F32",   # warm copper-bronze
+        "metallic": 0.90,
+        "roughness": 0.20,
+    },
+}

@@ -442,10 +442,11 @@ class MainWindow(QMainWindow):
     def _on_metal_changed(self, index: int) -> None:
         """Handle metal combo box change."""
         metal_name = self.metal_combo.currentText()
-        pour_temp = METAL_DEFAULTS[metal_name]["pour_temp_f"]
+        pour_temp  = METAL_DEFAULTS[metal_name]["pour_temp_f"]
         shrink_pct = METAL_DEFAULTS[metal_name]["shrinkage_pct"]
         self.pour_spin.setValue(pour_temp)
         self.shrink_label.setText("Shrinkage: " + str(shrink_pct) + "% (" + metal_name + ")")
+        self.viewport.set_active_metal(metal_name)
 
     def _on_flask_changed(self, text: str) -> None:
         """Handle flask size combo box change."""
