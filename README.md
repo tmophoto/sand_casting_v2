@@ -13,35 +13,40 @@ in a real-time 3D viewer.
 2. [Requirements](#requirements)
 3. [Installation](#installation)
 4. [Running the App](#running-the-app)
-5. [User Interface Walkthrough](#user-interface-walkthrough)
-6. [Simulation Physics](#simulation-physics)
-7. [Supported Metals](#supported-metals)
-8. [Gating System Components](#gating-system-components)
-9. [STL File Handling](#stl-file-handling)
-10. [Rendering Backends](#rendering-backends)
-11. [Adding a New Metal](#adding-a-new-metal)
-12. [Adding a New Gating Component](#adding-a-new-gating-component)
-13. [Running a Headless Sanity Check](#running-a-headless-sanity-check)
-14. [Building a Standalone Executable](#building-a-standalone-executable)
-15. [Project Structure](#project-structure)
-16. [Known Limitations](#known-limitations)
-17. [Troubleshooting](#troubleshooting)
+5. [Quick Start — One-Click Demo](#quick-start--one-click-demo)
+6. [User Interface Walkthrough](#user-interface-walkthrough)
+7. [Simulation Physics](#simulation-physics)
+8. [Supported Metals](#supported-metals)
+9. [Gating System Components](#gating-system-components)
+10. [STL File Handling](#stl-file-handling)
+11. [Rendering Backends](#rendering-backends)
+12. [Adding a New Metal](#adding-a-new-metal)
+13. [Adding a New Gating Component](#adding-a-new-gating-component)
+14. [Running Tests](#running-tests)
+15. [Running a Headless Sanity Check](#running-a-headless-sanity-check)
+16. [Building a Standalone Executable](#building-a-standalone-executable)
+17. [Project Structure](#project-structure)
+18. [Known Limitations](#known-limitations)
+19. [Troubleshooting](#troubleshooting)
 
 ---
 
 ## Features
 
+- **One-click demo** — pre-built Motor Mount Bracket with all settings
+  configured; press **▶ Try Demo** then **Simulate Pour** to see the full
+  simulation without loading any files
 - **STL import** with automatic mesh cleanup — degenerate triangle removal,
   deduplication, and decimation to 25,000 triangles
-- **Real-time 3D viewer** — GPU-accelerated via PyVista/OpenGL, or software
-  fallback via Matplotlib
+- **Real-time 3D viewer** — GPU-accelerated via PyVista/OpenGL with PBR
+  materials, SSAO, and shadow rendering; software fallback via Matplotlib
 - **Multi-model scene** — load and position several STL parts simultaneously
 - **Gating system** — place tapered sprue, horizontal runner, fan gate, and open
   riser; drag them interactively in the 3D viewport or use placement sliders
 - **Fill animation** — animated metal pour with per-triangle heat colouring and
-  a particle stream from the sprue
+  a particle stream from the sprue (120 smooth steps)
 - **Solidification animation** — solidification front sweeps inward after fill
-  completes
+  completes (120 smooth steps)
 - **Physics simulation** (runs in a background thread so the UI stays responsive):
   - Solidification time via Chvorinov's Rule
   - Fill time via Bernoulli gating hydraulics using the most-restrictive
@@ -49,6 +54,8 @@ in a real-time 3D viewer.
   - Defect risk detection: misrun, cold shut, burn-on, low superheat
 - **Defect markers** — coloured spheres rendered at risk locations after simulation
 - **Shrinkage compensation** — configurable scale factor per metal
+- **GPU array acceleration** — CuPy replaces NumPy transparently on CUDA GPUs;
+  falls back to NumPy automatically when unavailable
 - **Dark theme** — Catppuccin Mocha palette throughout
 - **Windows launcher** (`run.bat`) with automatic dependency installation
 
@@ -70,7 +77,7 @@ in a real-time 3D viewer.
 
 | Package | Purpose |
 |---|---|
-| pyvista + pyvistaqt | GPU-accelerated OpenGL renderer (preferred backend) |
+| pyvista + pyvistaqt | GPU-accelerated OpenGL renderer with PBR, SSAO, shadows |
 | cupy-cuda12x | CUDA array backend (replaces NumPy on CUDA GPUs) |
 
 Without PyVista the app falls back to a Matplotlib software renderer.
@@ -117,6 +124,26 @@ requirements automatically if missing, then launches the app.
 
 ---
 
+## Quick Start — One-Click Demo
+
+No STL file required to try the app.
+
+1. Launch the app (`python casting_sim.py` or `run.bat` on Windows).
+2. Click the green **▶ Try Demo** button in the *STL File* panel.
+3. A Motor Mount Bracket appears in the viewport with all settings
+   pre-configured (A356 Aluminum, 10×12 flask, full gating system).
+4. Click **Simulate Pour** in the right panel.
+5. Watch the fill animation, solidification animation, and defect markers.
+6. Review the results — the demo is tuned to trigger cold-shut and low-superheat
+   warnings so you can see how defect detection works.
+
+The Motor Mount Bracket is a procedurally generated part with a wide thin base
+plate, a thick central body, a cylindrical boss, two thin mounting ears, and two
+web ribs — deliberately mixing section thicknesses to exercise every part of the
+physics engine.
+
+---
+
 ## User Interface Walkthrough
 
 The window is divided into three panels:
@@ -127,12 +154,17 @@ The window is divided into three panels:
 | **Centre** | 3D viewport + view preset buttons |
 | **Right** | Simulation results, Simulate and Reset buttons |
 
-### 1 — Load an STL File
+### 1 — Load a Part
 
+**Option A — Load your own STL file**
 Click **Load STL…** in the *STL File* panel and choose any binary or ASCII `.stl`
 file. The part appears in the 3D viewport immediately. Volume and surface area are
 shown beneath the button. You can load multiple STL files; each becomes a
 separately movable model.
+
+**Option B — Use the built-in demo**
+Click **▶ Try Demo** to load the pre-built Motor Mount Bracket with all settings
+pre-configured. See [Quick Start](#quick-start--one-click-demo) above.
 
 ### 2 — Set the Parting Line
 
@@ -216,8 +248,7 @@ When complete:
 ### 9 — Reset
 
 Click **Reset** to stop all animations, clear the results panel, uncheck all
-gating components, and return all sliders to their defaults. Loaded STL models
-are also cleared from the scene.
+gating components, and return all sliders to their defaults.
 
 ### 10 — View Presets
 
@@ -345,14 +376,20 @@ Meshmixer or PrusaSlicer before importing if you get unexpected geometry values.
 Activated when `pyvista` and `pyvistaqt` are both importable.
 
 - GPU-accelerated OpenGL via VTK
-- PBR materials with metallic and roughness values
+- PBR materials with per-metal metallic and roughness values
+- Screen-space ambient occlusion (SSAO) and shadow rendering
+- 3-point lighting rig (key, fill, rim)
+- Incremental actor updates — model actors persist across frames; only the
+  fill overlay is rebuilt per animation step
 - `pyvistaqt.BackgroundPlotter` embeds directly in the Qt window
 
 ### Matplotlib 3D (fallback)
 Used when PyVista is unavailable.
 
-- Software-rendered `Poly3DCollection` with per-face Phong shading
-- Three-light rig (key, fill, rim) computed per frame
+- Software-rendered `Poly3DCollection` with per-face vectorised Phong shading
+- Persistent collections — model geometry is not cleared between frames;
+  only fill/particle overlays are removed per step
+- Three-light rig (key, fill, rim) computed with a single matrix multiply
 - Scroll-wheel zoom; click-drag to reposition models and gating
 - `FigureCanvasQTAgg` embedded in a `QVBoxLayout`
 
@@ -360,7 +397,7 @@ Used when PyVista is unavailable.
 
 ## Adding a New Metal
 
-Open `casting_sim.py` and add an entry to `METAL_DEFAULTS`:
+Open `constants.py` and add an entry to `METAL_DEFAULTS`:
 
 ```python
 METAL_DEFAULTS["Gray Iron (ASTM A48)"] = {
@@ -376,6 +413,15 @@ METAL_DEFAULTS["Gray Iron (ASTM A48)"] = {
 }
 ```
 
+Optionally add a matching entry to `METAL_PBR` in `constants.py` for PyVista
+PBR rendering:
+
+```python
+METAL_PBR["Gray Iron (ASTM A48)"] = {
+    "color": "#888888", "metallic": 0.6, "roughness": 0.5
+}
+```
+
 The metal appears in the **Metal** drop-down automatically — `_build_ui()`
 iterates over `METAL_DEFAULTS` to populate the combo box.
 
@@ -383,13 +429,30 @@ iterates over `METAL_DEFAULTS` to populate the combo box.
 
 ## Adding a New Gating Component
 
-1. Add the display name string to `GATING_COMPONENTS` in `casting_sim.py`.
+1. Add the display name string to the checkbox list in `MainWindow._build_ui()`
+   (`ui/main_window.py`).
 2. Add a rendering block inside `Viewport3D._draw_gating()` (Matplotlib path)
-   and optionally inside `_render_pyvista()`.
+   and optionally inside `_render_pyvista()` in `viewport/viewport.py`.
 3. If the component affects flow area, add a branch in
-   `SimWorker._compute_fill_time_gating_hydraulics()`.
+   `SimWorker._compute_fill_time_gating_hydraulics()` in `simulation/worker.py`.
 4. Expose its dimensions in `Viewport3D.get_gating_params()` so the worker
    receives the correct cross-section area.
+
+---
+
+## Running Tests
+
+```bash
+python -m pytest tests/
+```
+
+All tests are headless (no display required).
+
+| Test file | Coverage |
+|---|---|
+| `tests/test_simulation.py` | SimWorker physics — 30 tests |
+| `tests/test_formatter.py` | `build_results_text()` output format — 27 tests |
+| `tests/test_geometry.py` | Geometry helpers and mesh generators — 37 tests |
 
 ---
 
@@ -398,10 +461,9 @@ iterates over `METAL_DEFAULTS` to populate the combo box.
 Test the simulation worker without a display:
 
 ```python
-from casting_sim import SimWorker, METAL_DEFAULTS
+from simulation.worker import SimWorker
 
-results = {}
-
+result = {}
 w = SimWorker({
     "metal":         "A356 Aluminum",
     "vol_cm3":       200.0,
@@ -416,30 +478,39 @@ w = SimWorker({
         "gate_area_mm2":  40.0,
     },
 })
-w.finished.connect(lambda r: results.update(r))
+w.finished.connect(lambda r: result.update(r))
 w.run()
 
-print(f"Fill time : {results['fill_time_s']:.1f} s  ({results['restrictive_elem']})")
-print(f"Solidify  : {results['t_solidify_min']:.2f} min")
-print(f"Defects   : {results['defects'] or 'none'}")
+print(f"Fill time : {result['fill_time_s']:.1f} s  ({result['restrictive_elem']})")
+print(f"Solidify  : {result['t_solidify_min']:.2f} min")
+print(f"Defects   : {result['defects'] or 'none'}")
+```
+
+Or use the demo part directly:
+
+```python
+from ui.demo_part import build_demo_mesh
+triangles, normals, stats = build_demo_mesh()
+print(f"{len(triangles)} triangles, {stats['vol_cm3']:.1f} cm³")
 ```
 
 ---
 
 ## Building a Standalone Executable
 
-`build_exe.bat` (Windows) uses PyInstaller to produce a single-file executable:
+PyInstaller must run on the **same OS** as the target machine. To build a
+Windows `.exe`, run the following commands on a Windows machine:
 
 ```bat
+pip install pyinstaller
 build_exe.bat
 ```
 
-Output: `dist/SandCastingSim.exe`. `README.md` is bundled alongside it.
+Output: `dist/SandCastingSim.exe`.
 
-To build manually or on Linux/macOS:
+To build manually:
 
-```bash
-pip install pyinstaller
+```bat
 pyinstaller --onefile --windowed --name SandCastingSim casting_sim.py
 ```
 
@@ -449,31 +520,34 @@ pyinstaller --onefile --windowed --name SandCastingSim casting_sim.py
 
 ```
 sand_casting_v2/
-├── casting_sim.py          # Entire application (~2,500 lines)
-├── requirements.txt        # Mandatory Python dependencies
-├── README.md               # This file
-├── CLAUDE.md               # Developer guide for Claude Code sessions
-├── run.bat                 # Windows launcher (auto-installs deps)
-├── build_exe.bat           # PyInstaller build script
+├── casting_sim.py              # Entry point — calls main()
+├── constants.py                # METAL_DEFAULTS, FLASK_SIZES, METAL_PBR, colour constants
+├── requirements.txt            # Mandatory Python dependencies
+├── README.md                   # This file
+├── CLAUDE.md                   # Developer guide for Claude Code sessions
+├── run.bat                     # Windows launcher (auto-installs deps)
+├── build_exe.bat               # PyInstaller build script (run on Windows)
 │
-└── legacy helper scripts (not needed to run the app)
-    ├── fix_casting_sim.py
-    ├── fix_duplicates.py
-    ├── fix_orientation.py
-    ├── part2.py / part3_partA.py / part3_partB.py
-    └── temp_append.py / mainwindow_part1.py / test_append.py
+├── ui/
+│   ├── style.py                # APP_STYLE QSS (Catppuccin Mocha dark theme)
+│   ├── collapsible.py          # CollapsiblePanel widget
+│   ├── main_window.py          # MainWindow — UI layout, signal wiring, event handlers
+│   └── demo_part.py            # build_demo_mesh() — procedural Motor Mount Bracket
+│
+├── simulation/
+│   └── worker.py               # SimWorker — physics calculations in a QThread
+│
+├── viewport/
+│   └── viewport.py             # Viewport3D — 3D rendering, STL loading, animation
+│
+├── results/
+│   └── formatter.py            # build_results_text() — formats result dict → text
+│
+└── tests/
+    ├── test_simulation.py      # SimWorker physics (30 tests)
+    ├── test_formatter.py       # build_results_text output format (27 tests)
+    └── test_geometry.py        # Geometry helpers and mesh generators (37 tests)
 ```
-
-### `casting_sim.py` Internal Structure
-
-| Class / Function | Role |
-|---|---|
-| `CollapsiblePanel` | Reusable collapsible QFrame widget |
-| `SimWorker` | QObject that runs all physics in a QThread |
-| `Viewport3D` | 3D rendering, STL loading, animation, mouse interaction |
-| `build_results_text()` | Formats the result dict into a plain-text report |
-| `MainWindow` | Top-level window, UI layout, signal wiring, event handlers |
-| `main()` | Entry point — creates QApplication and shows MainWindow |
 
 ---
 
