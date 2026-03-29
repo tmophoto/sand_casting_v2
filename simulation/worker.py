@@ -88,19 +88,21 @@ class SimWorker(QObject):
             restrictive_elem = "gate"
 
 
-        if effective_area_mm2:
+        if effective_area_mm2 and effective_area_mm2 > 0:
             velocity_ms = Cd * math.sqrt(g * sprue_height_mm / 1000.0)
             area_cm2 = effective_area_mm2 / 100.0
             velocity_cm_s = velocity_ms * 100.0
             flow_rate_cm3s = area_cm2 * velocity_cm_s
+            # Physical exit velocity via Torricelli (2·g·h, g in mm/s², h in mm → mm/s)
+            fill_velocity_mm_s = Cd * math.sqrt(2.0 * g * sprue_height_mm)
 
 
             if flow_rate_cm3s > 0:
                 fill_time_s = vol_cm3 / flow_rate_cm3s
-                return max(1.5, fill_time_s), restrictive_elem
+                return max(1.5, fill_time_s), restrictive_elem, fill_velocity_mm_s
 
 
-        return max(3.0, vol_cm3 / 80.0), "fallback"
+        return max(3.0, vol_cm3 / 80.0), "fallback", 0.0
 
 
 
@@ -134,22 +136,23 @@ class SimWorker(QObject):
 
         self.progress.emit(50, "Checking defect risks")
         superheat = pour_f - metal["melt_temp_f"]
+        min_superheat = metal.get("min_superheat_f", 50)
         defects  = []
         warnings = []
 
 
-        if superheat < 50:
-            defects.append("Misrun risk superheat below 50 F")
+        if superheat < min_superheat:
+            defects.append(f"Misrun risk — superheat {superheat:.0f} F below minimum {min_superheat} F")
         if thin_wall and pour_f < metal["melt_temp_f"] + 150:
-            defects.append("Cold shut risk thin wall with low superheat")
+            defects.append("Cold shut risk — thin wall with low superheat")
         if mold_f > 120:
-            warnings.append("Burn-on warning mold temp above 120 F")
-        if superheat < 100:
-            warnings.append("Low superheat warning superheat below 100 F")
+            warnings.append("Burn-on risk — mold temp above 120 F")
+        if superheat < min_superheat * 2:
+            warnings.append(f"Low superheat — {superheat:.0f} F (recommended ≥ {min_superheat * 2} F)")
 
 
         self.progress.emit(70, "Computing gating hydraulics")
-        fill_time_s, restrictive = self._compute_fill_time_gating_hydraulics(
+        fill_time_s, restrictive, fill_velocity_mm_s = self._compute_fill_time_gating_hydraulics(
             vol_cm3, gating_params, pour_f, metal
         )
 
@@ -157,24 +160,39 @@ class SimWorker(QObject):
         self.progress.emit(90, "Assembling results")
 
 
+        cooling_rate = superheat / t_solidify_min if t_solidify_min > 0 else 0.0
+        fill_possible = fill_time_s < (t_solidify_min * 60.0)
+        if not fill_possible:
+            warnings.append(
+                f"Fill time ({fill_time_s:.0f}s) exceeds solidification time "
+                f"({t_solidify_min * 60:.0f}s) — increase gating area or pour temp"
+            )
+
+        if vsr > 1.5 and t_solidify_min > 5.0 and not has_riser:
+            warnings.append("Porosity risk — thick section with no riser; add Riser (Open) to feed shrinkage")
+
+
         # Use shrink_scale from params if provided, otherwise compute from metal defaults
         shrink_scale = p.get("shrink_scale", 1.0 + (metal["shrinkage_pct"] / 100.0))
 
 
         result = {
-            "t_solidify_min": t_solidify_min,
-            "fill_time_s":    fill_time_s,
-            "restrictive_elem": restrictive,
-            "vsr":            vsr,
-            "vol_cm3":        vol_cm3,
-            "surf_cm2":       surf_cm2,
-            "superheat":      superheat,
-            "defects":        defects,
-            "warnings":       warnings,
-            "metal":          metal_name,
-            "pour_f":         pour_f,
-            "mold_f":         mold_f,
-            "shrink_scale":   shrink_scale,  # FIX: now properly computed
+            "t_solidify_min":    t_solidify_min,
+            "fill_time_s":       fill_time_s,
+            "fill_velocity_mm_s": fill_velocity_mm_s,
+            "fill_possible":     fill_possible,
+            "cooling_rate":      cooling_rate,
+            "restrictive_elem":  restrictive,
+            "vsr":               vsr,
+            "vol_cm3":           vol_cm3,
+            "surf_cm2":          surf_cm2,
+            "superheat":         superheat,
+            "defects":           defects,
+            "warnings":          warnings,
+            "metal":             metal_name,
+            "pour_f":            pour_f,
+            "mold_f":            mold_f,
+            "shrink_scale":      shrink_scale,
         }
 
 

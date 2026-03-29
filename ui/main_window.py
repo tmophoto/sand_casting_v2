@@ -91,6 +91,10 @@ class MainWindow(QMainWindow):
         self.parting_slider.setMinimum(5)
         self.parting_slider.setMaximum(95)
         self.parting_slider.setValue(50)
+        self.parting_slider.setToolTip(
+            "Where the mold splits into cope (top) and drag (bottom),\n"
+            "expressed as % of part height."
+        )
         label = QLabel("Position: 50%")
         parting_layout.addWidget(label)
         parting_layout.addWidget(self.parting_slider)
@@ -153,11 +157,17 @@ class MainWindow(QMainWindow):
         self.mold_spin.setValue(100)
         self.thin_combo = QComboBox()
         self.thin_combo.addItems(["No", "Yes"])
+        self.thin_combo.setToolTip(
+            "Flag thin-walled sections (<6 mm).\n"
+            "Tightens the cold shut superheat threshold."
+        )
         metal_layout.addWidget(QLabel("Metal:"))
         metal_layout.addWidget(self.metal_combo)
-        metal_layout.addWidget(QLabel("Pour Temp: 1300 F (default for A356)"))
+        self.pour_temp_label = QLabel(f"Pour Temp: {METAL_DEFAULTS['A356 Aluminum']['pour_temp_f']} °F")
+        metal_layout.addWidget(self.pour_temp_label)
         metal_layout.addWidget(self.pour_spin)
-        metal_layout.addWidget(QLabel("Mold Temp: 100 F"))
+        self.mold_temp_label = QLabel("Mold Temp: 100 °F")
+        metal_layout.addWidget(self.mold_temp_label)
         metal_layout.addWidget(self.mold_spin)
         metal_layout.addWidget(QLabel("Thin Wall?"))
         metal_layout.addWidget(self.thin_combo)
@@ -211,18 +221,22 @@ class MainWindow(QMainWindow):
         self.sprue_x_slider.setMinimum(-200)
         self.sprue_x_slider.setMaximum(200)
         self.sprue_x_slider.setValue(0)
+        self.sprue_x_slider.setToolTip("Sprue X position relative to part centre (mm)")
         self.sprue_y_slider = QSlider(Qt.Orientation.Horizontal)
         self.sprue_y_slider.setMinimum(-200)
         self.sprue_y_slider.setMaximum(200)
         self.sprue_y_slider.setValue(0)
+        self.sprue_y_slider.setToolTip("Sprue Y position relative to part centre (mm)")
         self.riser_x_slider = QSlider(Qt.Orientation.Horizontal)
         self.riser_x_slider.setMinimum(-200)
         self.riser_x_slider.setMaximum(200)
         self.riser_x_slider.setValue(0)
+        self.riser_x_slider.setToolTip("Riser X position relative to part centre (mm)")
         self.riser_y_slider = QSlider(Qt.Orientation.Horizontal)
         self.riser_y_slider.setMinimum(-200)
         self.riser_y_slider.setMaximum(200)
         self.riser_y_slider.setValue(0)
+        self.riser_y_slider.setToolTip("Riser Y position relative to part centre (mm)")
         gating_placement_layout.addWidget(QLabel("Sprue X: 0 mm"))
         gating_placement_layout.addWidget(self.sprue_x_slider)
         gating_placement_layout.addWidget(QLabel("Sprue Y: 0 mm"))
@@ -246,8 +260,13 @@ class MainWindow(QMainWindow):
         self.shrink_slider.setMinimum(100)
         self.shrink_slider.setMaximum(110)
         self.shrink_slider.setValue(106)
+        self.shrink_slider.setToolTip(
+            "Scale the pattern slightly larger to compensate for metal shrinkage.\n"
+            "The slider adds 0–10 % to part dimensions."
+        )
         shrink_pct = METAL_DEFAULTS["A356 Aluminum"]["shrinkage_pct"]
-        self.shrink_label = QLabel("Shrinkage: " + str(shrink_pct) + "% (A356 Aluminum)")
+        scale_val = 1.0 + (106 - 100) / 1000.0
+        self.shrink_label = QLabel(f"Shrinkage: {shrink_pct}%  ·  scale ×{scale_val:.3f}")
         shrink_layout.addWidget(self.shrink_label)
         shrink_layout.addWidget(self.shrink_slider)
         # Add container widget (not layout) to panel
@@ -295,12 +314,13 @@ class MainWindow(QMainWindow):
         right_panel.addWidget(result_label)
         self.results_text = QTextEdit()
         self.results_text.setReadOnly(True)
+        self.results_text.setAcceptRichText(True)
         self.results_text.setMinimumWidth(350)
         right_panel.addWidget(self.results_text)
         self.sim_btn = QPushButton("Simulate Pour")
-        self.sim_btn.setStyleSheet("QPushButton { background-color: #89B4FA; color: black; padding: 10px; font-weight: bold; }")
+        self.sim_btn.setObjectName("sim_btn")
         self.reset_btn = QPushButton("Reset")
-        self.reset_btn.setStyleSheet("QPushButton { background-color: #F38BA8; color: black; padding: 10px; }")
+        self.reset_btn.setObjectName("reset_btn")
         btn_layout = QHBoxLayout()
         btn_layout.addWidget(self.sim_btn)
         btn_layout.addWidget(self.reset_btn)
@@ -390,13 +410,19 @@ class MainWindow(QMainWindow):
         self.riser_y_slider.valueChanged.connect(lambda v: update_gating())
 
 
-        # Shrinkage slider
+        # Pour temp / mold temp live labels
+        self.pour_spin.valueChanged.connect(
+            lambda v: self.pour_temp_label.setText(f"Pour Temp: {v} °F")
+        )
+        self.mold_spin.valueChanged.connect(
+            lambda v: self.mold_temp_label.setText(f"Mold Temp: {v} °F")
+        )
 
+        # Shrinkage slider
         def update_shrink_label(val):
             pct = METAL_DEFAULTS[self.metal_combo.currentText()]["shrinkage_pct"]
             scale = 1.0 + (val - 100) / 1000.0
-            self.shrink_label.setText("Shrinkage: " + str(pct) + "% (" + self.metal_combo.currentText() + ")")
-
+            self.shrink_label.setText(f"Shrinkage: {pct}%  ·  scale ×{scale:.3f}")
 
         self.shrink_slider.valueChanged.connect(update_shrink_label)
 
@@ -519,7 +545,9 @@ class MainWindow(QMainWindow):
         pour_temp  = METAL_DEFAULTS[metal_name]["pour_temp_f"]
         shrink_pct = METAL_DEFAULTS[metal_name]["shrinkage_pct"]
         self.pour_spin.setValue(pour_temp)
-        self.shrink_label.setText("Shrinkage: " + str(shrink_pct) + "% (" + metal_name + ")")
+        self.pour_temp_label.setText(f"Pour Temp: {pour_temp} °F")
+        scale_val = 1.0 + (self.shrink_slider.value() - 100) / 1000.0
+        self.shrink_label.setText(f"Shrinkage: {shrink_pct}%  ·  scale ×{scale_val:.3f}")
         self.viewport.set_active_metal(metal_name)
 
     def _on_flask_changed(self, text: str) -> None:
@@ -591,7 +619,7 @@ class MainWindow(QMainWindow):
         self.reset_btn.setEnabled(True)
         if result:
             self._last_result = result
-            self.results_text.setText(build_results_text(result))
+            self.results_text.setHtml(build_results_text(result))
             # Decorate defects for drawing
             defects = result.get("defects", [])
             decorated_defects = []
@@ -606,12 +634,16 @@ class MainWindow(QMainWindow):
                     decorated_defects.append(d)
             # Start animations with draw_defect_markers as final callback
             duration = max(2.0, result.get("fill_time_s", 3.0))
+            vsr = result.get("vsr", 1.0)
             self.viewport.start_fill_animation(
                 duration_s=duration,
-                on_done=lambda: self.viewport.draw_defect_markers(decorated_defects)
+                on_done=lambda: self.viewport.draw_defect_markers(decorated_defects, vsr)
             )
         else:
-            self.results_text.setText("Simulation failed or was cancelled.")
+            self.results_text.setHtml(
+                "<p style='color:#F38BA8;font-family:Consolas,monospace;font-size:11px;'>"
+                "Simulation failed or was cancelled.</p>"
+            )
 
     def _on_reset(self) -> None:
         """Reset the application state."""

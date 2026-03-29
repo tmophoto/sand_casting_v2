@@ -971,7 +971,7 @@ class Viewport3D(QWidget):
 
 
 
-    def _draw_defect_markers(self, defects):
+    def _draw_defect_markers(self, defects, vsr: float = 1.0):
 
         """Draw colored spheres at defect risk regions.
 
@@ -979,10 +979,12 @@ class Viewport3D(QWidget):
             defects: List of defect descriptions. Each can be:
                 - String description (generic placement)
                 - Tuple (type, x, y, z) with coordinates
+            vsr: Volume-to-surface ratio (cm) used to scale marker radius.
         """
 
         if not self.models or not defects:
             return
+        marker_r = max(4.0, min(vsr * 8.0, 20.0))
         _, _, _, _, zmin, zmax = self._compute_bounds()
         for i, defect in enumerate(defects):
             if isinstance(defect, tuple) and len(defect) >= 4:
@@ -997,34 +999,33 @@ class Viewport3D(QWidget):
                 y = rng.uniform(-10, 10)
                 z = zmax + 30 + i * 8
             if dtype in ("shrinkage", "shrinkage_risk"):
-                # Red sphere for shrinkage risk
-                sphere = pv.Sphere(radius=6.0, center=(x, y, z))
+                sphere = pv.Sphere(radius=marker_r, center=(x, y, z))
                 self.plotter.add_mesh(sphere, color="red", opacity=0.8)
             elif dtype in ("cold_shut", "cold shut", "cold_shut_risk"):
-                # Yellow sphere for cold shut risk
-                sphere = pv.Sphere(radius=6.0, center=(x, y, z))
+                sphere = pv.Sphere(radius=marker_r, center=(x, y, z))
                 self.plotter.add_mesh(sphere, color="yellow", opacity=0.8)
             else:
-                # Default - use type detection from string description
                 desc = defect.lower() if isinstance(defect, str) else ""
                 if "shrinkage" in desc:
-                    sphere = pv.Sphere(radius=6.0, center=(x, y, z))
+                    sphere = pv.Sphere(radius=marker_r, center=(x, y, z))
                     self.plotter.add_mesh(sphere, color="red", opacity=0.8)
                 elif "cold" in desc:
-                    sphere = pv.Sphere(radius=6.0, center=(x, y, z))
+                    sphere = pv.Sphere(radius=marker_r, center=(x, y, z))
                     self.plotter.add_mesh(sphere, color="yellow", opacity=0.8)
 
 
 
-    def _draw_defect_markers_matplotlib(self, defects):
+    def _draw_defect_markers_matplotlib(self, defects, vsr: float = 1.0):
 
         """Draw defect markers using matplotlib."""
 
         if not self.models or not defects:
             return
+        marker_s = max(80, min(int(vsr * 160), 400))
         _, _, _, _, zmin, zmax = self._compute_bounds()
         colors = {"shrinkage": "red", "cold_shut": "yellow"}
         for i, defect in enumerate(defects):
+            dtype = ""
             if isinstance(defect, tuple) and len(defect) >= 4:
                 dtype = defect[0].lower()
                 x, y, z = defect[1], defect[2], defect[3]
@@ -1035,16 +1036,16 @@ class Viewport3D(QWidget):
                 z = zmax + 30 + i * 8
             desc = defect.lower() if isinstance(defect, str) else ""
             color = colors.get(dtype, "red" if "shrinkage" in desc else "yellow" if "cold" in desc else "gray")
-            self.ax.scatter(x, y, z, c=color, s=200, marker="o", depthshade=True)
+            self.ax.scatter(x, y, z, c=color, s=marker_s, marker="o", depthshade=True)
 
-    def draw_defect_markers(self, defects: list) -> None:
+    def draw_defect_markers(self, defects: list, vsr: float = 1.0) -> None:
 
         """Public method to draw defect markers using current backend."""
 
         if self.use_pyvista:
-            self._draw_defect_markers(defects)
+            self._draw_defect_markers(defects, vsr)
         else:
-            self._draw_defect_markers_matplotlib(defects)
+            self._draw_defect_markers_matplotlib(defects, vsr)
 
 
 
@@ -1100,8 +1101,8 @@ class Viewport3D(QWidget):
         rel_pos = (centroids_z - fill_z) / z_range   # <0 hot, >0 cooling/cold
 
         # Plasma LUT lookup: hot=0.95 (yellow), cooling edge=0.30 (deep red)
-        _COOL_RANGE = 0.18
-        t = np.clip(rel_pos / _COOL_RANGE, 0.0, 1.0)   # 0=hot, 1=solid
+        _COOL_RANGE = 0.35   # wider band → softer thermal gradient, no hard waterline
+        t = np.clip(rel_pos / _COOL_RANGE, 0.0, 1.0) ** 0.5  # sqrt easing — gradual fade
         lut_idx = np.clip(((0.95 - 0.30) * (1.0 - t) + 0.30) * 255,
                           0, 255).astype(np.int32)
         rgb = _PLASMA_LUT[lut_idx].astype(np.float64)   # (n, 3) from LUT
@@ -1485,7 +1486,9 @@ class Viewport3D(QWidget):
 
     def _anim_tick(self):
         self._anim_step += 1
-        self._anim_frac  = self._anim_step / self._anim_steps
+        t = self._anim_step / self._anim_steps
+        # Ease-in-out quad: slow start/end, fast middle — mimics mold resistance
+        self._anim_frac = t * t * (3.0 - 2.0 * t)
         self.render(self._anim_frac)
         if self._anim_step >= self._anim_steps:
             self._anim_frac = 0.0

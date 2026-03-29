@@ -244,7 +244,8 @@ class TestShrinkageScale:
 class TestResultDict:
 
     REQUIRED_KEYS = {
-        "t_solidify_min", "fill_time_s", "restrictive_elem",
+        "t_solidify_min", "fill_time_s", "fill_velocity_mm_s",
+        "fill_possible", "cooling_rate", "restrictive_elem",
         "vsr", "vol_cm3", "surf_cm2", "superheat",
         "defects", "warnings", "metal", "pour_f", "mold_f", "shrink_scale",
     }
@@ -261,3 +262,67 @@ class TestResultDict:
         r = run_sim(BASE_PARAMS)
         assert r["pour_f"] == BASE_PARAMS["pour_temp_f"]
         assert r["mold_f"] == BASE_PARAMS["mold_temp_f"]
+
+
+# ---------------------------------------------------------------------------
+# Robustness & new physics
+# ---------------------------------------------------------------------------
+
+class TestRobustness:
+
+    def test_unknown_metal_raises_key_error(self):
+        """A typo in the metal name should fail loudly, not silently produce nonsense."""
+        import pytest
+        with pytest.raises(KeyError):
+            run_sim({**BASE_PARAMS, "metal": "6061 Aluminum"})
+
+    def test_negative_superheat_flagged_as_defect(self):
+        """Pour temp below liquidus → superheat < 0 → misrun defect."""
+        params = {**BASE_PARAMS, "pour_temp_f": 900}  # well below A356 liquidus 1075
+        r = run_sim(params)
+        assert r["superheat"] < 0
+        assert len(r["defects"]) > 0
+
+    def test_fill_before_solidify_sanity(self):
+        """For a well-gated part, fill should complete before solidification."""
+        gating = {
+            "has_sprue": True, "has_gate": True,
+            "sprue_top_r": 7.5, "sprue_bot_r": 4.0, "gate_area_mm2": 40.0,
+        }
+        r = run_sim({**BASE_PARAMS, "gating_params": gating})
+        assert r["fill_possible"] is True
+
+    def test_bronze_min_superheat_higher_than_aluminum(self):
+        """Bronze requires more superheat than aluminum — min_superheat_f = 150."""
+        from constants import METAL_DEFAULTS
+        al_min  = METAL_DEFAULTS["A356 Aluminum"]["min_superheat_f"]
+        br_min  = METAL_DEFAULTS["Everdur Bronze (C52100)"]["min_superheat_f"]
+        assert br_min > al_min
+
+    def test_new_metals_present_in_defaults(self):
+        """All three new metals must be in METAL_DEFAULTS and have required keys."""
+        from constants import METAL_DEFAULTS, METAL_PBR
+        for name in ["Gray Iron (ASTM A48)", "Ductile Iron (65-45-12)", "316 Stainless Steel"]:
+            assert name in METAL_DEFAULTS, f"Missing from METAL_DEFAULTS: {name}"
+            assert name in METAL_PBR,      f"Missing from METAL_PBR: {name}"
+            assert "min_superheat_f" in METAL_DEFAULTS[name]
+
+    def test_fill_velocity_zero_without_gating(self):
+        """Without gating the hydraulics fallback returns 0 velocity."""
+        r = run_sim({**BASE_PARAMS, "gating_params": {}})
+        assert r["fill_velocity_mm_s"] == 0.0
+
+    def test_fill_velocity_positive_with_gating(self):
+        """With a sprue and gate, fill velocity should be a positive number."""
+        gating = {
+            "has_sprue": True, "has_gate": True,
+            "sprue_top_r": 7.5, "sprue_bot_r": 4.0, "gate_area_mm2": 40.0,
+        }
+        r = run_sim({**BASE_PARAMS, "gating_params": gating})
+        assert r["fill_velocity_mm_s"] > 0
+
+    def test_porosity_warning_without_riser(self):
+        """Heavy section (high VSR) with no riser should trigger a porosity warning."""
+        heavy = {**BASE_PARAMS, "vol_cm3": 2000.0, "surf_cm2": 600.0, "has_riser": False}
+        r = run_sim(heavy)
+        assert any("porosity" in w.lower() for w in r["warnings"])
