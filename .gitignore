@@ -2,4 +2,6 @@
 __pycache__/
 build/
 dist/
+# Ignore auto-generated specs but track our hand-crafted build spec
 *.spec
+!SandCastingSim.spec
