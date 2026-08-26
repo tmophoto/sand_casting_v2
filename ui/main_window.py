@@ -4,21 +4,21 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QSplitter, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QSlider, QCheckBox, QScrollArea,
     QProgressBar, QFileDialog, QInputDialog, QMessageBox, QSpinBox,
-    QListWidget, QListWidgetItem, QTextBrowser,
+    QListWidget, QListWidgetItem, QTextBrowser, QFrame,
 )
 from PyQt6.QtCore import Qt, QThread, QUrl, QShortcut
-from PyQt6.QtGui import QKeySequence
+from PyQt6.QtGui import QKeySequence, QDragEnterEvent, QDropEvent
 import numpy as np
 from ui.style import APP_STYLE
 from ui.collapsible import CollapsiblePanel
 from ui.demo_part import build_demo_mesh, DEMO_PART_NAME
 from viewport.viewport import Viewport3D
 from simulation.worker import SimWorker
-from results.formatter import build_results_text
+from results.formatter import build_results_text, empty_results_html
 from constants import (
     METAL_DEFAULTS, FLASK_SIZES, shrink_scale_from_slider, DEFAULT_FLASK_HEIGHT_IN,
     MOLD_TYPES, GATING_RATIOS, DEFAULT_SHELL_MM, SHELL_MM_MIN,
-    SHELL_MM_MAX,
+    SHELL_MM_MAX, CERAMIC_SHELL,
 )
 from simulation.mesh_tools import scale_geometry, local_thickness, THIN_WALL_MM
 from simulation.foundry import (
@@ -34,9 +34,10 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Sand Casting Simulator")
+        self.setWindowTitle("Casting Simulator")
         self.resize(1480, 920)
         self.setStyleSheet(APP_STYLE)
+        self.setAcceptDrops(True)
 
         self._geometry_stats = {"vol_cm3": 100.0, "surf_cm2": 120.0}
         self._sim_thread = None
@@ -48,9 +49,11 @@ class MainWindow(QMainWindow):
         self._session_path = None
 
         self.viewport = Viewport3D()
+        self._sand_molds = [n for n in MOLD_TYPES if n != CERAMIC_SHELL]
         self._build_ui()
         self._wire_signals()
         self._refresh_recents()
+        self._refresh_status()
 
     # ------------------------------------------------------------------
     # Layout
@@ -60,24 +63,27 @@ class MainWindow(QMainWindow):
         shell = QWidget()
         self.setCentralWidget(shell)
         outer = QVBoxLayout(shell)
-        outer.setContentsMargins(8, 8, 8, 8)
-        outer.setSpacing(6)
+        outer.setContentsMargins(10, 10, 10, 8)
+        outer.setSpacing(8)
 
-        outer.addLayout(self._build_top_bar())
+        outer.addWidget(self._build_top_bar())
+        outer.addWidget(self._build_step_bar())
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         outer.addWidget(splitter)
 
         left_widget = QWidget()
         left_panel = QVBoxLayout(left_widget)
-        left_panel.setContentsMargins(4, 4, 4, 4)
+        left_panel.setContentsMargins(0, 0, 8, 0)
+        left_panel.setSpacing(8)
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setWidget(left_widget)
-        left_scroll.setMinimumWidth(300)
+        left_scroll.setMinimumWidth(312)
         splitter.addWidget(left_scroll)
 
         self._build_part_panel(left_panel)
+        self._build_process_panel(left_panel)
         self._build_gating_panel(left_panel)
         self._build_metal_panel(left_panel)
         self._build_flask_panel(left_panel)
@@ -89,7 +95,7 @@ class MainWindow(QMainWindow):
 
         center = QWidget()
         center_l = QVBoxLayout(center)
-        center_l.setContentsMargins(4, 4, 4, 4)
+        center_l.setContentsMargins(0, 0, 0, 0)
         if hasattr(self.viewport, "render_frame"):
             center_l.addWidget(self.viewport.render_frame)
         else:
@@ -98,67 +104,155 @@ class MainWindow(QMainWindow):
 
         right = QWidget()
         right_l = QVBoxLayout(right)
-        right_l.setContentsMargins(8, 4, 8, 4)
+        right_l.setContentsMargins(8, 0, 0, 0)
+        right_l.setSpacing(8)
         views = QHBoxLayout()
+        views.setSpacing(4)
         for view in ["Top", "Bottom", "Front", "Back", "Left", "Right", "Iso"]:
             btn = QPushButton(view)
+            btn.setObjectName("viewBtn")
             btn.clicked.connect(lambda _, v=view: self.viewport.set_view(v))
-            btn.setStyleSheet("QPushButton { padding: 4px 8px; font-size: 9px; }")
             views.addWidget(btn)
         right_l.addLayout(views)
-        right_l.addWidget(QLabel("Simulation Results"))
+        res_cap = QLabel("RESULTS")
+        res_cap.setObjectName("caption")
+        right_l.addWidget(res_cap)
         self.results_text = QTextBrowser()
         self.results_text.setOpenExternalLinks(False)
         self.results_text.setOpenLinks(False)
         self.results_text.setMinimumWidth(340)
+        self.results_text.setHtml(empty_results_html())
         right_l.addWidget(self.results_text)
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
 
+        self._status = QLabel("Drop a part to start")
+        self._status.setObjectName("statusChip")
+        outer.addWidget(self._status)
         self._main_layout = outer
 
-    def _build_top_bar(self) -> QHBoxLayout:
-        bar = QHBoxLayout()
-        self.demo_btn = QPushButton("▶ Try Demo")
-        self.demo_btn.setToolTip("Load the Motor Mount Bracket with a full gating setup.")
-        self.demo_btn.setStyleSheet(
-            "QPushButton { background-color: #A6E3A1; color: black; font-weight: bold; padding: 6px 12px; }"
-        )
-        self.load_btn = QPushButton("Load STL…")
-        self.sim_btn = QPushButton("Simulate Pour")
-        self.sim_btn.setObjectName("sim_btn")
+    def _build_top_bar(self) -> QFrame:
+        chrome = QFrame()
+        chrome.setObjectName("chromeBar")
+        bar = QHBoxLayout(chrome)
+        bar.setContentsMargins(10, 8, 10, 8)
+        bar.setSpacing(8)
+
+        mark = QLabel("Casting")
+        mark.setObjectName("wordmark")
+        sub = QLabel("Simulator")
+        sub.setObjectName("wordmarkSub")
+        bar.addWidget(mark)
+        bar.addWidget(sub)
+
+        self.demo_btn = QPushButton("Try demo")
+        self.demo_btn.setObjectName("demoBtn")
+        self.demo_btn.setToolTip("Load the Motor Mount Bracket with gating already placed.")
+        self.load_btn = QPushButton("Open part…")
+        self.load_btn.setObjectName("ghostBtn")
+        self.sim_btn = QPushButton("Simulate pour")
+        self.sim_btn.setObjectName("primaryBtn")
+        self.sim_btn.setEnabled(False)
+        self.sim_btn.setToolTip("Load a part first.")
         self.reset_btn = QPushButton("Reset")
-        self.reset_btn.setObjectName("reset_btn")
-        self.save_btn = QPushButton("Save")
-        self.open_btn = QPushButton("Open")
-        self.export_btn = QPushButton("Export…")
+        self.reset_btn.setObjectName("dangerBtn")
+        self.save_btn = QPushButton("Save job")
+        self.save_btn.setObjectName("ghostBtn")
+        self.open_btn = QPushButton("Open job")
+        self.open_btn.setObjectName("ghostBtn")
+        self.export_btn = QPushButton("Export")
+        self.export_btn.setObjectName("ghostBtn")
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
-        self.progress_bar.setMaximumWidth(220)
-        for w in (self.demo_btn, self.load_btn, self.sim_btn, self.reset_btn,
-                  self.save_btn, self.open_btn, self.export_btn):
-            bar.addWidget(w)
+        self.progress_bar.setMaximumWidth(200)
+
+        bar.addSpacing(8)
+        bar.addWidget(self.demo_btn)
+        bar.addWidget(self.load_btn)
+        bar.addSpacing(12)
+        bar.addWidget(self.sim_btn)
+        bar.addWidget(self.reset_btn)
         bar.addStretch()
         bar.addWidget(self.progress_bar)
+        bar.addWidget(self.save_btn)
+        bar.addWidget(self.open_btn)
+        bar.addWidget(self.export_btn)
+        return chrome
+
+    def _build_step_bar(self) -> QFrame:
+        bar = QFrame()
+        bar.setObjectName("stepBar")
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(6, 0, 6, 0)
+        for text in (
+            "1  Open a part",
+            "2  Pick sand or shell",
+            "3  Place gating",
+            "4  Simulate",
+        ):
+            lab = QLabel(text)
+            lab.setObjectName("step")
+            row.addWidget(lab)
+        row.addStretch()
         return bar
+
+    def _caption(self, text: str) -> QLabel:
+        lab = QLabel(text.upper())
+        lab.setObjectName("caption")
+        return lab
 
     def _build_part_panel(self, parent):
         panel = CollapsiblePanel("Part")
         box = QWidget()
         lay = QVBoxLayout(box)
-        self.stl_label = QLabel("No file loaded — try the demo or load an STL.")
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.stl_label = QLabel("Drop an STL or OBJ on the window — or open a part.")
         self.stl_label.setWordWrap(True)
+        self.stl_label.setObjectName("hint")
         lay.addWidget(self.stl_label)
-        lay.addWidget(QLabel("Recent"))
+        lay.addWidget(self._caption("Import units"))
+        self.units_combo = QComboBox()
+        self.units_combo.addItem("Millimetres", 1.0)
+        self.units_combo.addItem("Inches", 25.4)
+        self.units_combo.setToolTip("Scale the file so the simulator works in millimetres.")
+        lay.addWidget(self.units_combo)
+        lay.addWidget(self._caption("Recent"))
         self.recent_list = QListWidget()
-        self.recent_list.setMaximumHeight(90)
+        self.recent_list.setMaximumHeight(96)
         lay.addWidget(self.recent_list)
         panel.content_layout.addWidget(box)
         parent.addWidget(panel)
         panel.setExpanded(True)
         self._part_panel = panel
+
+    def _build_process_panel(self, parent):
+        panel = CollapsiblePanel("Process")
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        hint = QLabel("Same part, two shop methods. Pick one — flask vs fired shell.")
+        hint.setWordWrap(True)
+        hint.setObjectName("hint")
+        lay.addWidget(hint)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.sand_btn = QPushButton("Sand mold")
+        self.sand_btn.setObjectName("processBtn")
+        self.sand_btn.setCheckable(True)
+        self.sand_btn.setChecked(True)
+        self.sand_btn.setToolTip("Green, dry, or resin sand in a flask.")
+        self.shell_btn = QPushButton("Ceramic shell")
+        self.shell_btn.setObjectName("processBtn")
+        self.shell_btn.setCheckable(True)
+        self.shell_btn.setToolTip("Investment / lost-wax. Preheat the fired shell.")
+        row.addWidget(self.sand_btn)
+        row.addWidget(self.shell_btn)
+        lay.addLayout(row)
+        panel.content_layout.addWidget(box)
+        parent.addWidget(panel)
+        panel.setExpanded(True)
 
     def _build_gating_panel(self, parent):
         panel = CollapsiblePanel("Gating")
@@ -248,16 +342,17 @@ class MainWindow(QMainWindow):
         self.metal_combo = QComboBox()
         for metal in METAL_DEFAULTS:
             self.metal_combo.addItem(metal)
-        lay.addWidget(QLabel("Alloy"))
+        lay.addWidget(self._caption("Alloy"))
         lay.addWidget(self.metal_combo)
-        lay.addWidget(QLabel("Mold"))
+        self.sand_type_label = self._caption("Sand type")
+        lay.addWidget(self.sand_type_label)
         self.mold_combo = QComboBox()
-        for name in MOLD_TYPES:
+        for name in self._sand_molds:
             self.mold_combo.addItem(name)
         lay.addWidget(self.mold_combo)
         self.mold_hint = QLabel("")
         self.mold_hint.setWordWrap(True)
-        self.mold_hint.setStyleSheet("color: #A6ADC8; font-size: 11px;")
+        self.mold_hint.setObjectName("hint")
         lay.addWidget(self.mold_hint)
 
         self.pour_spin = QSpinBox()
@@ -265,8 +360,9 @@ class MainWindow(QMainWindow):
         self.pour_spin.setSuffix(" °F")
         self.pour_spin.setValue(METAL_DEFAULTS["A356 Aluminum"]["pour_temp_f"])
         self.pour_temp_label = QLabel("Pour temp")
+        self.pour_temp_label.setObjectName("caption")
         self.pour_band_label = QLabel("")
-        self.pour_band_label.setStyleSheet("color: #A6ADC8; font-size: 11px;")
+        self.pour_band_label.setObjectName("hint")
         lay.addWidget(self.pour_temp_label)
         lay.addWidget(self.pour_spin)
         lay.addWidget(self.pour_band_label)
@@ -276,10 +372,11 @@ class MainWindow(QMainWindow):
         self.mold_spin.setSuffix(" °F")
         self.mold_spin.setValue(100)
         self.mold_temp_label = QLabel("Mold temp")
+        self.mold_temp_label.setObjectName("caption")
         lay.addWidget(self.mold_temp_label)
         lay.addWidget(self.mold_spin)
         self.preheat_band_label = QLabel("")
-        self.preheat_band_label.setStyleSheet("color: #A6ADC8; font-size: 11px;")
+        self.preheat_band_label.setObjectName("hint")
         self.preheat_band_label.setVisible(False)
         lay.addWidget(self.preheat_band_label)
 
@@ -288,7 +385,7 @@ class MainWindow(QMainWindow):
         self.thin_combo.setToolTip(
             f"Auto flags walls thinner than {THIN_WALL_MM:.0f} mm."
         )
-        lay.addWidget(QLabel("Thin wall"))
+        lay.addWidget(self._caption("Thin wall"))
         lay.addWidget(self.thin_combo)
         panel.content_layout.addWidget(box)
         parent.addWidget(panel)
@@ -467,6 +564,8 @@ class MainWindow(QMainWindow):
 
         self.metal_combo.currentIndexChanged.connect(self._on_metal_changed)
         self.mold_combo.currentTextChanged.connect(self._on_mold_changed)
+        self.sand_btn.clicked.connect(lambda: self._set_process("sand"))
+        self.shell_btn.clicked.connect(lambda: self._set_process("shell"))
         self.pour_spin.valueChanged.connect(self._on_pour_changed)
         self.mold_spin.valueChanged.connect(self._on_mold_temp_changed)
         self.shell_mm_slider.valueChanged.connect(self._on_shell_mm_changed)
@@ -638,12 +737,25 @@ class MainWindow(QMainWindow):
         if self._is_shell():
             self.mold_spin.setValue(recommended_shell_preheat_f(metal_name))
         self._sync_process_ui(set_preheat=False)
+        self._refresh_status()
 
     def _is_shell(self) -> bool:
-        return is_shell_mold(self.mold_combo.currentText())
+        return bool(self.shell_btn.isChecked())
+
+    def _set_process(self, kind: str) -> None:
+        sand = kind != "shell"
+        self.sand_btn.blockSignals(True)
+        self.shell_btn.blockSignals(True)
+        self.sand_btn.setChecked(sand)
+        self.shell_btn.setChecked(not sand)
+        self.sand_btn.blockSignals(False)
+        self.shell_btn.blockSignals(False)
+        self._sync_process_ui(set_preheat=True)
+        self._refresh_status()
 
     def _on_mold_changed(self, _text: str = "") -> None:
-        self._sync_process_ui(set_preheat=True)
+        self._sync_process_ui(set_preheat=False)
+        self._refresh_status()
 
     def _on_mold_temp_changed(self, val: int) -> None:
         if self._is_shell():
@@ -661,6 +773,8 @@ class MainWindow(QMainWindow):
         rec = recommended_shell_preheat_f(metal_name)
         self._flask_sand_box.setVisible(not shell)
         self._flask_shell_box.setVisible(shell)
+        self.mold_combo.setVisible(not shell)
+        self.sand_type_label.setVisible(not shell)
         self.flask_panel.setTitle("Ceramic shell" if shell else "Flask")
         self.preheat_band_label.setVisible(shell)
         if shell:
@@ -811,28 +925,42 @@ class MainWindow(QMainWindow):
 
     def _on_load_stl(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(
-            self, "Load STL File", "", "STL Files (*.stl);;All Files (*)"
+            self, "Open part", "",
+            "Mesh files (*.stl *.obj);;STL (*.stl);;OBJ (*.obj);;All files (*)",
         )
         if filename:
             self._load_stl_path(filename)
 
+    def _import_scale(self) -> float:
+        data = self.units_combo.currentData()
+        try:
+            return float(data)
+        except (TypeError, ValueError):
+            return 1.0
+
+    def _enable_simulate(self, on: bool) -> None:
+        self.sim_btn.setEnabled(on)
+        self.sim_btn.setToolTip("" if on else "Load a part first.")
+
     def _load_stl_path(self, filename: str) -> None:
         try:
-            stats = self.viewport.load_stl(filename)
+            stats = self.viewport.load_stl(filename, scale=self._import_scale())
             self._geometry_stats = stats
             self._stl_path = filename
             self._is_demo = False
-            self._set_stl_label(f"Loaded: {Path(filename).name}", stats)
+            self._set_stl_label(f"{Path(filename).name}", stats)
             remember_project(filename)
             self._refresh_recents()
             self._refresh_flask_fit()
+            self._enable_simulate(True)
+            self._refresh_status()
             if stats.get("mesh_warnings"):
                 QMessageBox.warning(
                     self, "Mesh quality",
-                    "This STL may not be a closed solid:\n\n" + "\n".join(stats["mesh_warnings"]),
+                    "This mesh may not be a closed solid:\n\n" + "\n".join(stats["mesh_warnings"]),
                 )
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to load STL:\n{str(e)}")
+            QMessageBox.critical(self, "Error", f"Could not open part:\n{str(e)}")
 
     def _on_load_demo(self) -> None:
         self._on_reset()
@@ -870,7 +998,10 @@ class MainWindow(QMainWindow):
         self._set_stl_label("Demo: Motor Mount Bracket", stats)
         self.stl_label.setText(self.stl_label.text() + "\nHeight: 102 mm — 7 primitives")
         self.viewport.render()
+        self.viewport.fit_view()
         self._refresh_flask_fit()
+        self._enable_simulate(True)
+        self._refresh_status()
 
     def _collect_session(self) -> dict:
         data = default_session()
@@ -880,7 +1011,7 @@ class MainWindow(QMainWindow):
             "metal": self.metal_combo.currentText(),
             "pour_temp_f": self.pour_spin.value(),
             "mold_temp_f": self.mold_spin.value(),
-            "mold_type": self.mold_combo.currentText(),
+            "mold_type": CERAMIC_SHELL if self._is_shell() else self.mold_combo.currentText(),
             "shell_mm": self.shell_mm_slider.value(),
             "thin_wall": self.thin_combo.currentText(),
             "parting_pct": self.parting_slider.value(),
@@ -919,8 +1050,15 @@ class MainWindow(QMainWindow):
             self.viewport.set_active_metal(data["metal"])
             self._update_pour_band()
         self.mold_combo.blockSignals(True)
-        if data.get("mold_type"):
-            self.mold_combo.setCurrentText(data["mold_type"])
+        mold = data.get("mold_type") or "Green sand"
+        if is_shell_mold(mold):
+            self.sand_btn.setChecked(False)
+            self.shell_btn.setChecked(True)
+        else:
+            self.sand_btn.setChecked(True)
+            self.shell_btn.setChecked(False)
+            if mold in self._sand_molds:
+                self.mold_combo.setCurrentText(mold)
         self.mold_combo.blockSignals(False)
         self.shell_mm_slider.blockSignals(True)
         self.shell_mm_slider.setValue(int(data.get("shell_mm", DEFAULT_SHELL_MM)))
@@ -954,6 +1092,8 @@ class MainWindow(QMainWindow):
         self.shrink_slider.setValue(int(data.get("shrink_slider", 106)))
         if data.get("gating_ratio"):
             self.ratio_combo.setCurrentText(data["gating_ratio"])
+        self._enable_simulate(bool(self.viewport.models or data.get("demo")))
+        self._refresh_status()
 
     def _on_save_session(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -977,7 +1117,7 @@ class MainWindow(QMainWindow):
 
     def _open_path(self, path: str) -> None:
         p = Path(path)
-        if p.suffix.lower() == ".stl":
+        if p.suffix.lower() in {".stl", ".obj"}:
             self._load_stl_path(path)
             return
         try:
@@ -1044,7 +1184,7 @@ class MainWindow(QMainWindow):
             "metal": metal_name,
             "pour_temp_f": self.pour_spin.value(),
             "mold_temp_f": self.mold_spin.value(),
-            "mold_type": self.mold_combo.currentText(),
+            "mold_type": CERAMIC_SHELL if self._is_shell() else self.mold_combo.currentText(),
             "shell_mm": self.shell_mm_slider.value(),
             "thin_wall": self._thin_wall_flag(),
             "shrinkage": metal_params["shrinkage_pct"],
@@ -1078,7 +1218,7 @@ class MainWindow(QMainWindow):
 
     def _on_sim_done(self, result: dict) -> None:
         self.progress_bar.setVisible(False)
-        self.sim_btn.setEnabled(True)
+        self._enable_simulate(bool(self.viewport.models))
         self.reset_btn.setEnabled(True)
         if not result:
             self.results_text.setHtml(
@@ -1161,7 +1301,7 @@ class MainWindow(QMainWindow):
         self.shrink_slider.setValue(min(110, 100 + int(round(metal["shrinkage_pct"]))))
         for cb in self.gating_checkboxes.values():
             cb.setChecked(False)
-        self.results_text.setHtml("")
+        self.results_text.setHtml(empty_results_html())
         self._last_result = None
         self.viewport.set_restrictive("")
         self.as_cast_cb.setChecked(False)
@@ -1208,6 +1348,30 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Export failed", str(e))
             return
         QMessageBox.information(self, "Export", f"Saved:\n{path}")
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path:
+                self._open_path(path)
+                break
+
+    def _refresh_status(self) -> None:
+        if self._is_demo:
+            part = "Demo bracket"
+        elif self._stl_path:
+            part = Path(self._stl_path).name
+        elif self.viewport.models:
+            part = self.viewport.active_model or "Part"
+        else:
+            part = "No part"
+        metal = self.metal_combo.currentText()
+        proc = "Ceramic shell" if self._is_shell() else self.mold_combo.currentText()
+        self._status.setText(f"{part}    ·    {metal}    ·    {proc}")
 
     def closeEvent(self, event) -> None:
         if self._sim_thread is not None:

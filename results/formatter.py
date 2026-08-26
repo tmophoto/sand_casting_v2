@@ -62,7 +62,41 @@ def _verdict_banner(r: dict) -> str:
     title, fg, bg = _VERDICT.get(key, _VERDICT["risky"])
     return (
         f'<tr><td colspan="2" style="background:{bg};color:{fg};font-weight:bold;'
-        f'padding:8px 6px;border-radius:4px;font-size:13px;">{html.escape(title)}</td></tr>'
+        f'padding:10px 8px;border-radius:8px;font-size:14px;">{html.escape(title)}</td></tr>'
+    )
+
+
+def _kpi_row(r: dict) -> str:
+    y = r.get("yield_pct")
+    y_str = f"{y:.0f}%" if y is not None else "—"
+    fill = r.get("fill_time_s")
+    sol = r.get("t_solidify_min")
+    cells = [
+        ("Fill", f"{fill:.1f} s" if fill is not None else "—"),
+        ("Solidify", f"{sol:.2f} min" if sol is not None else "—"),
+        ("Yield", y_str),
+    ]
+    inner = "".join(
+        f'<td style="width:33%;text-align:center;padding:8px 4px;background:#1E1E2E;border-radius:8px;">'
+        f'<div style="color:{_C["dim"]};font-size:10px;letter-spacing:0.4px;">{lab}</div>'
+        f'<div style="color:{_C["value"]};font-size:14px;font-weight:700;padding-top:2px;">{val}</div>'
+        f'</td>'
+        for lab, val in cells
+    )
+    return f'<tr><td colspan="2" style="padding:6px 0;"><table style="width:100%;border-collapse:separate;border-spacing:6px 0;"><tr>{inner}</tr></table></td></tr>'
+
+
+def empty_results_html() -> str:
+    """Placeholder shown before the first pour."""
+    return (
+        f'<html><body style="background:{_C["bg"]};margin:16px;font-family:Segoe UI,sans-serif;">'
+        f'<div style="color:{_C["heading"]};font-size:15px;font-weight:700;padding-bottom:8px;">Ready when you are</div>'
+        f'<div style="color:{_C["label"]};font-size:12px;line-height:1.55;">'
+        f'1. Drop a part (STL or OBJ) or try the demo<br>'
+        f'2. Pick sand or ceramic shell<br>'
+        f'3. Place a sprue and gate<br>'
+        f'4. Hit <b style="color:{_C["value"]};">Simulate pour</b>'
+        f'</div></body></html>'
     )
 
 
@@ -96,6 +130,7 @@ def build_results_text(r: dict) -> str:
 
     rows = []
     rows.append(_verdict_banner(r))
+    rows.append(_kpi_row(r))
     rows.append(_divider())
 
     rows.append(_section("INPUT"))
@@ -180,7 +215,7 @@ def build_results_text(r: dict) -> str:
                 )
 
     table = (
-        f'<table style="width:100%;border-collapse:collapse;font-family:Consolas,monospace;font-size:11px;">'
+        f'<table style="width:100%;border-collapse:collapse;font-family:Segoe UI,sans-serif;font-size:12px;">'
         + "".join(rows)
         + "</table>"
     )

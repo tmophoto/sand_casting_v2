@@ -4,7 +4,6 @@ import random
 import time
 import numpy as np
 import matplotlib.cm as _cm
-from stl import mesh as stl_mesh
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QSizePolicy
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -24,7 +23,7 @@ from constants import (COPE_COLOR, DRAG_COLOR, SPRUE_COLOR, RUNNER_COLOR,
                        DEFAULT_FLASK_HEIGHT_IN, SHELL_COLOR, DEFAULT_SHELL_MM)
 from simulation.mesh_tools import (
     inspect_mesh, invert_winding, qem_decimate, local_thickness,
-    find_defect_sites, THIN_WALL_MM,
+    find_defect_sites, THIN_WALL_MM, load_mesh_vectors,
 )
 from simulation.foundry import (
     snap_xy_to_silhouette, choke_location, draft_analysis, undercut_hints,
@@ -234,7 +233,7 @@ class Viewport3D(QWidget):
 
 
     def _draw_idle_scene(self):
-        hint = "Load an STL or try the demo"
+        hint = "Drop an STL or OBJ here\nor try the demo"
         if self.use_pyvista:
             self.plotter.clear()
             self._pv_actors.clear()
@@ -323,29 +322,27 @@ class Viewport3D(QWidget):
 
 
 
-    def load_stl(self, path: str, name: str = None) -> dict:
+    def load_stl(self, path: str, name: str = None, scale: float = 1.0) -> dict:
+        """Load an STL or OBJ, clean it, and add it to the scene.
 
-        """Load an STL file, auto-name it, and add it to the scene."""
-
+        ``scale`` converts file units into millimetres (1.0 = already mm, 25.4 = inches).
+        """
         if name is None:
             n = len(self.models) + 1
             name = f"Part_{n}"
 
+        vectors = load_mesh_vectors(path)
+        if abs(float(scale) - 1.0) > 1e-12:
+            vectors = np.asarray(vectors, dtype=np.float64) * float(scale)
 
-        loaded = stl_mesh.Mesh.from_file(path)
-
-        # Clean degenerate triangles
-        vectors = loaded.vectors
         v0, v1, v2 = vectors[:, 0], vectors[:, 1], vectors[:, 2]
         cross = np.cross(v1 - v0, v2 - v0)
         areas = np.linalg.norm(cross, axis=1)
-        # Remove NaN, Inf, and zero-area (degenerate) triangles
         valid = (
             np.isfinite(vectors).all(axis=(1, 2)) &
             (areas > 1e-10)
         )
         vectors = vectors[valid]
-        # Remove duplicate triangles by hashing centroid coordinates
         centroids = vectors.mean(axis=1).round(6)
         _, unique_idx = np.unique(centroids, axis=0, return_index=True)
         vectors = vectors[unique_idx]
@@ -357,9 +354,11 @@ class Viewport3D(QWidget):
         vectors = qem_decimate(vectors, max_tris=25_000)
         thickness = local_thickness(vectors)
 
+        class _Mesh:
+            pass
+        loaded = _Mesh()
         loaded.vectors = vectors
 
-        # Pre-compute unit face normals for shading (Phase 4a — avoids per-frame recompute)
         _v0, _v1, _v2 = vectors[:, 0], vectors[:, 1], vectors[:, 2]
         _cross = np.cross(_v1 - _v0, _v2 - _v0).astype(np.float64)
         _lens = np.linalg.norm(_cross, axis=1, keepdims=True)
@@ -369,7 +368,7 @@ class Viewport3D(QWidget):
         self.models[name] = {
             "mesh":        loaded,
             "render_data": vectors,
-            "normals":     _cross,   # unit face normals in local space (n, 3)
+            "normals":     _cross,
             "thickness":   thickness,
         }
         self.transforms[name] = {
@@ -379,9 +378,9 @@ class Viewport3D(QWidget):
         if not self.active_model:
             self.active_model = name
 
-
         stats = self._geometry_stats(loaded)
         self.render()
+        self.fit_view()
         return stats
 
 
@@ -1787,6 +1786,17 @@ class Viewport3D(QWidget):
             elev, azim = views[view_name]
             self.ax.view_init(elev=elev, azim=azim)
             self.draw_idle()
+
+    def fit_view(self) -> None:
+        """Frame the part (or flask) in the camera."""
+        if self.use_pyvista:
+            try:
+                self.plotter.reset_camera()
+                self.plotter.view_isometric()
+            except Exception:
+                pass
+            return
+        self.set_view("Iso")
 
     def set_pour_rate(self, rate: float):
         self.pour_rate = max(0.5, min(3.0, rate))

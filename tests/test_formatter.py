@@ -13,7 +13,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from results.formatter import build_results_text
+from results.formatter import build_results_text, empty_results_html
 
 
 # ---------------------------------------------------------------------------
@@ -268,3 +268,15 @@ class TestRobustness:
         assert "8 mm" in text
         assert "Shell preheat" in text
         assert "1100" in text
+
+    def test_kpi_strip_present(self):
+        text = build({"yield_pct": 72.0})
+        assert "Fill" in text
+        assert "Solidify" in text
+        assert "Yield" in text
+        assert "72%" in text
+
+    def test_empty_results_placeholder(self):
+        html = empty_results_html()
+        assert "Ready when you are" in html
+        assert "Simulate" in html

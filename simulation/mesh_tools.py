@@ -436,3 +436,41 @@ def scale_geometry(vol_cm3: float, surf_cm2: float, z_max: float, scale: float) 
     """Linear pattern scale → volume ∝ s³, area ∝ s², height ∝ s."""
     s = float(scale)
     return vol_cm3 * s ** 3, surf_cm2 * s ** 2, z_max * s
+
+
+def load_obj_triangles(path: str) -> np.ndarray:
+    """Load a triangulated (or fan-triangulated) Wavefront OBJ as (N, 3, 3) mm."""
+    verts: list[list[float]] = []
+    tris: list[list[list[float]]] = []
+    with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if parts[0] == "v" and len(parts) >= 4:
+                verts.append([float(parts[1]), float(parts[2]), float(parts[3])])
+            elif parts[0] == "f" and len(parts) >= 4:
+                idx = []
+                for p in parts[1:]:
+                    i = int(p.split("/")[0])
+                    i = i - 1 if i > 0 else len(verts) + i
+                    idx.append(i)
+                for k in range(1, len(idx) - 1):
+                    tris.append([verts[idx[0]], verts[idx[k]], verts[idx[k + 1]]])
+    if not tris:
+        raise ValueError("OBJ file has no triangular faces.")
+    return np.asarray(tris, dtype=np.float64)
+
+
+def load_mesh_vectors(path: str) -> np.ndarray:
+    """Load STL or OBJ triangles as an (N, 3, 3) array."""
+    from pathlib import Path
+    suf = Path(path).suffix.lower()
+    if suf == ".obj":
+        return load_obj_triangles(path)
+    if suf in {".stl", ""}:
+        from stl import mesh as stl_mesh
+        loaded = stl_mesh.Mesh.from_file(path)
+        return np.asarray(loaded.vectors, dtype=np.float64)
+    raise ValueError(f"Unsupported mesh type '{suf}'. Use STL or OBJ.")

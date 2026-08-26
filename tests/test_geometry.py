@@ -359,3 +359,51 @@ class TestMeshTools:
         assert abs(vol - 100.0 * 1.1 ** 3) < 1e-9
         assert abs(surf - 80.0 * 1.1 ** 2) < 1e-9
         assert abs(z - 55.0) < 1e-9
+
+
+class TestMeshImport:
+
+    def test_obj_triangle(self, tmp_path=None):
+        import tempfile
+        from simulation.mesh_tools import load_obj_triangles, load_mesh_vectors
+        obj = "\n".join([
+            "v 0 0 0",
+            "v 1 0 0",
+            "v 0 1 0",
+            "v 0 0 1",
+            "f 1 2 3",
+            "f 1 2 4",
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "t.obj")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(obj)
+            tris = load_obj_triangles(path)
+            assert tris.shape == (2, 3, 3)
+            again = load_mesh_vectors(path)
+            assert again.shape == (2, 3, 3)
+
+    def test_obj_quad_fan_triangulates(self):
+        import tempfile
+        from simulation.mesh_tools import load_obj_triangles
+        obj = "\n".join([
+            "v 0 0 0",
+            "v 1 0 0",
+            "v 1 1 0",
+            "v 0 1 0",
+            "f 1 2 3 4",
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "q.obj")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(obj)
+            tris = load_obj_triangles(path)
+            assert tris.shape[0] == 2
+
+    def test_unsupported_mesh_type(self):
+        from simulation.mesh_tools import load_mesh_vectors
+        try:
+            load_mesh_vectors("part.step")
+            assert False, "expected ValueError"
+        except ValueError as e:
+            assert "STEP" in str(e).upper() or "Unsupported" in str(e)

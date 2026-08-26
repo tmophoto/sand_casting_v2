@@ -33,9 +33,9 @@ in a real-time 3D viewer.
 
 ## Features
 
-- **One-click demo** — pre-built Motor Mount Bracket; **▶ Try Demo** lives on the top bar
-- **STL import** with automatic mesh cleanup — degenerate triangle removal,
-  winding repair, QEM decimation to 25,000 triangles, and thin-wall detection
+- **One-click demo** — pre-built Motor Mount Bracket on the top bar
+- **STL / OBJ import** — drag-and-drop, millimetre or inch units, degenerate-triangle
+  cleanup, winding repair, QEM decimation to 25,000 triangles, and thin-wall detection
 - **Top-bar workflow** — Load, Simulate, Save/Open `.cast.json` sessions, recents, Undo (Ctrl+Z)
 - **Gating as a layout tool** — click a piece in 3D to edit it; snap to the part silhouette;
   1:2:2 / 1:4:4 area-ratio presets; choke ring at the restrictive section
