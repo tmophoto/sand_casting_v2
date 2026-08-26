@@ -2,9 +2,10 @@
 
 ## Project Overview
 
-Desktop hobbyist tool for simulating sand casting processes. Users load STL files,
-configure gating systems and metal types, then run physics-based simulations to
-estimate fill time, solidification time, and identify defect risks.
+Desktop hobbyist tool for simulating casting processes. Users load STL files,
+pick **sand mold**, **ceramic shell**, or **printed sand**, place gating, then
+run physics-based simulations to estimate fill time, solidification time, melt
+and sand-mix tickets, and defect risk.
 
 ## Running the App
 
@@ -31,70 +32,103 @@ automatically.
 
 ## Architecture
 
-The codebase is split into a package structure. `casting_sim.py` is a thin
-73-line entry point; all logic lives in the modules below.
+`casting_sim.py` is a thin entry point (`main()`). All logic lives in the
+modules below.
 
 ```
-casting_sim.py          # entry point — calls main()
-constants.py            # METAL_DEFAULTS, FLASK_SIZES, colour constants
+casting_sim.py          # entry point
+constants.py            # METAL_DEFAULTS, MOLD_TYPES, SHOP_RECIPES, colours
 ui/
-  style.py              # APP_STYLE QSS (Catppuccin Mocha dark theme)
+  style.py              # APP_STYLE QSS (Catppuccin Mocha)
   collapsible.py        # CollapsiblePanel widget
-  main_window.py        # MainWindow — UI layout, signal wiring, event handlers
+  main_window.py        # MainWindow — layout, signals, sessions, traveler
+  demo_part.py          # Motor Mount Bracket
 simulation/
-  worker.py             # SimWorker — physics calculations in a QThread
-  mesh_tools.py         # Mesh quality, QEM decimation, local thickness, defect sites
-  foundry.py            # Yield, riser modulus, draft, flask fit, verdicts
-  session.py            # Save/load .cast.json and recent files
+  worker.py             # SimWorker — Chvorinov, hydraulics, voxels, tickets
+  foundry.py            # Yield, riser/neck, draft, flask, process_kind, verdicts
+  shop.py               # Recipes, wizard, melt / sand-mix / pattern tickets
+  voxels.py             # Coarse fill / freeze / porosity / Niyama / X-ray points
+  session.py            # .cast.json + recents
+  mesh_tools.py         # QEM, local thickness, defect sites
 viewport/
-  viewport.py           # Viewport3D — 3D rendering, STL loading, animation
+  viewport.py           # Viewport3D — PyVista or matplotlib
 results/
-  formatter.py          # build_results_text() — formats result dict → text
+  formatter.py          # build_results_text() + build_traveler_html()
 tests/
-  test_simulation.py    # SimWorker physics (headless)
-  test_formatter.py     # build_results_text output format
-  test_geometry.py      # Geometry helpers and mesh generators
+  conftest.py           # QT_QPA_PLATFORM=offscreen
+  test_simulation.py
+  test_formatter.py
+  test_geometry.py
+  test_foundry.py
+  test_shop.py
+  test_voxels.py
 ```
 
 ### Module Summary
 
 | Module | Key class / function | Role |
 |---|---|---|
-| `constants.py` | — | All shared constants; no deps on other app modules |
-| `ui/style.py` | `APP_STYLE` | QSS stylesheet string |
-| `ui/collapsible.py` | `CollapsiblePanel` | Collapsible QFrame widget |
-| `ui/main_window.py` | `MainWindow` | Top-level window, UI, signal wiring |
-| `simulation/worker.py` | `SimWorker` | QObject worker; runs physics in QThread |
-| `viewport/viewport.py` | `Viewport3D` | 3-D rendering (PyVista or matplotlib fallback) |
-| `results/formatter.py` | `build_results_text()` | Formats simulation results → plain text |
+| `constants.py` | `METAL_DEFAULTS`, `MOLD_TYPES`, `SHOP_RECIPES` | Shared constants; no deps on other app modules |
+| `ui/style.py` | `APP_STYLE` | QSS stylesheet |
+| `ui/collapsible.py` | `CollapsiblePanel` | Collapsible QFrame |
+| `ui/main_window.py` | `MainWindow` | Window, process picker, traveler, Keep as A |
+| `simulation/worker.py` | `SimWorker` | Physics in a QThread |
+| `simulation/foundry.py` | `process_kind`, `riser_ok`, `gating_volumes_cm3` | Foundry helpers |
+| `simulation/shop.py` | `size_rigging`, `sand_mix_ticket` | Shop-floor extras |
+| `simulation/voxels.py` | `analyze` | Coarse voxel pass |
+| `simulation/session.py` | `save_session`, `load_session` | Jobs and recents |
+| `viewport/viewport.py` | `Viewport3D` | 3-D view, gating meshes, overlays |
+| `results/formatter.py` | `build_results_text`, `build_traveler_html` | HTML for results / PDF |
 
 ### Dependency graph (no circular deps)
 
 ```
-constants ← simulation/worker
+constants ← simulation/{worker,foundry,shop,session}
 constants ← viewport/viewport
 constants ← ui/main_window
-ui/style   ← ui/main_window
-ui/collapsible ← ui/main_window
-simulation/worker ← ui/main_window
+ui/style, ui/collapsible ← ui/main_window
+simulation/{worker,foundry,shop,session,mesh_tools} ← ui/main_window
 viewport/viewport ← ui/main_window
 results/formatter ← ui/main_window
 ui/main_window ← casting_sim
+foundry + shop + voxels ← simulation/worker
 ```
 
 ## Physics
 
-- **Solidification time** — Chvorinov's Rule: `t = B × (V/A)²`
-  where `B = 3.0 × mold_constant × (H/H_A356) × (k_A356/k) × mold_factor`.
-  `mold_factor` is 1.00 green sand, 1.15 dry sand, 0.85 resin/no-bake.
-  Ceramic shell starts at 0.62 (thin cold 8 mm shell) then scales with fired
-  thickness and shell preheat (hot shells freeze slower; extra coats insulate).
-- **Fill time** — Bernoulli gating hydraulics using the most restrictive cross-section.
-  Falls back to `max(3.0 s, volume_cm³ / 80.0)` when no gating is configured.
-- **Yield** — melt mass is part + gating metal; casting yield is part / total.
-- **Riser** — open-riser modulus must exceed 1.2 × part V/A on heavy sections.
-- **Defect detection** — misrun, cold shut, burn-on (sand), low superheat, flask overflow,
-  ceramic-shell preheat / breakthrough, plus Auto thin-wall from local mesh thickness (< 6 mm).
+- **Solidification time** — Chvorinov: `t = B × (V/A)²` with
+  `B = 3.0 × mold_constant × (H/H_A356) × (k_A356/k) × mold_factor`.
+  `mold_factor`: green 1.00, dry 1.15, resin 0.85, printed sand 0.90.
+  Ceramic shell starts at 0.62 (cold 8 mm) then scales with fired thickness
+  and preheat (`effective_mold_factor` / `shell_chvorinov_factor`).
+- **Fill time** — Bernoulli at the smallest of sprue exit, runner, gate area
+  (× number of gates), foam filter (`area × 0.35`). Fallback
+  `max(3.0 s, volume_cm³ / 80.0)` when no gating is configured.
+- **Yield** — melt mass is part + gating (sprue, runner, gate(s), riser, neck,
+  basin, filter); casting yield is part / total.
+- **Riser** — open cylinder modulus must exceed 1.2 × part V/A on heavy sections.
+  Blind risers add the top as a cooling face. Neck modulus is **lateral only**
+  (ends sit on riser and casting). Warn on blind or a pinched neck
+  (`neck_r < 0.4 × riser_r`).
+- **Voxels** — ~32³ occupancy, gravity flood from the gate, freeze ~
+  `B × dist²`, isolated-liquid porosity, Niyama proxy, chills, sleeve.
+  X-ray uses `porosity_xyz` / `hot_xyz`. Feeding stop fraction is **0.70**.
+- **Defect detection** — misrun, cold shut, burn-on (**sand only**), low
+  superheat, flask overflow (**sand only**), ceramic-shell preheat /
+  breakthrough, isolated liquid, erosion, gravity-flood unfilled lobes.
+  Auto thin-wall from local mesh thickness (< 6 mm).
+
+## Processes
+
+| `process_kind` | `mold_type` string | Flask | Draft scolding | UI panel |
+|---|---|---|---|---|
+| `sand` | Green / Dry / Resin | Yes | Yes | Flask |
+| `shell` | Ceramic shell | No | Optional (wax die) | Fired shell mm + preheat |
+| `printed` | Printed sand | No | No | Print-box wall mm + vents |
+
+Helpers: `is_shell_mold()`, `is_printed_sand()`, `process_kind()` in
+`simulation/foundry.py`. Printed sand must **not** add a warning on every
+pour (that would force verdict=`risky`).
 
 ## Metals
 
@@ -108,64 +142,94 @@ ui/main_window ← casting_sim
 
 ## Rendering Backends
 
-1. **PyVista** (preferred) — GPU-accelerated OpenGL, PBR materials, real-time
-   lighting. Requires `pyvista` and `pyvistaqt`.
-2. **Matplotlib 3D** (fallback) — software-rendered Poly3DCollection with per-face
-   Phong shading. Always available.
+1. **PyVista** (preferred) — GPU OpenGL, PBR, SSAO, shadows. Requires
+   `pyvista` and `pyvistaqt`.
+2. **Matplotlib 3D** (fallback) — `Poly3DCollection`. Always available.
 
-`PV_AVAILABLE` in `viewport/viewport.py` gates which backend is used;
-`Viewport3D.use_pyvista` records which was successfully initialised at runtime.
+`PV_AVAILABLE` in `viewport/viewport.py` gates the backend;
+`Viewport3D.use_pyvista` records what initialised at runtime.
+
+Do **not** pass `shade=True` with `edgecolors="none"` on Matplotlib
+collections — current matplotlib shades empty edgecolours and aborts.
+Cope/drag collections use `shade=False`.
+
+X-ray: hide/ghost the skin (`overlay_mode == "xray"`), scatter peach
+last-to-freeze and pink porosity points. Never write
+`np.asarray(arr or default)` — a non-empty ndarray is ambiguous in boolean
+context.
 
 ## STL Handling
 
-`Viewport3D.load_stl()` performs these clean-up passes before rendering:
-1. Remove NaN / Inf / zero-area (degenerate) triangles.
-2. Deduplicate triangles by centroid hash.
-3. Invert face winding when signed volume is negative.
-4. Decimate to at most 25,000 triangles with Garland–Heckbert QEM (grid
-   clustering as a last-resort fallback).
+`Viewport3D.load_stl()`:
 
-`_geometry_stats()` computes volume via the divergence theorem and surface area
-from cross-product magnitudes — both in one vectorised NumPy pass — plus local
-wall thickness for thin-wall auto-detect.
+1. Remove NaN / Inf / zero-area triangles.
+2. Deduplicate by centroid hash.
+3. Invert winding when signed volume is negative.
+4. QEM decimate to ≤ 25,000 triangles (grid clustering as last resort).
+
+`_geometry_stats()` computes volume (divergence theorem) and surface area
+(cross-product magnitudes) in one vectorised NumPy pass, plus local wall
+thickness for thin-wall Auto.
 
 ## Running Tests
 
 ```bash
-python -m pytest tests/
+QT_QPA_PLATFORM=offscreen python -m pytest tests/
 ```
 
-Install test extras with `pip install -r requirements-dev.txt`. All tests are
-headless (`QT_QPA_PLATFORM=offscreen`; no display required). The simulation and geometry tests
-import modules directly; only `test_simulation.py` needs a QApplication instance
-(created automatically inside the test file).
+Install extras with `pip install -r requirements-dev.txt`. All tests are
+headless. `tests/conftest.py` sets `QT_QPA_PLATFORM=offscreen`.
+`test_simulation.py` creates a QApplication for `pyqtSignal`.
 
-## Helper Scripts (not part of the app)
+| File | Focus |
+|---|---|
+| `test_simulation.py` | SimWorker physics |
+| `test_formatter.py` | Results + traveler HTML |
+| `test_geometry.py` | Mesh helpers |
+| `test_foundry.py` | Processes, riser/neck, session |
+| `test_shop.py` | Recipes, wizard, tickets |
+| `test_voxels.py` | Rasterize / flood / porosity |
 
-The root directory previously contained one-off `fix_*.py` / `part*.py` scripts.
-Those have been deleted; they are not required to run the application.
+**214 tests** at last count.
 
 ## Git Branch
 
-Active development happens on feature branches. Do not push directly to `master`.
+Active work for shop traveler / printed sand / extra gating lives on
+`cursor/shop-report-next-55e2`. Do not push directly to `master`.
 
 ## Common Tasks
 
 ### Add a new metal
 
-1. Add an entry to `METAL_DEFAULTS` in `constants.py`.
-2. `MainWindow._build_ui()` auto-populates the combo box from that dict —
-   no other changes needed.
+1. Add an entry to `METAL_DEFAULTS` in `constants.py` (include `min_superheat_f`).
+2. Optional: `METAL_PBR`, `SHELL_PREHEAT_DEFAULT_F`, `ALLOY_USD_PER_LB`,
+   `FERROUS_METALS` (wizard uses 1:4:4 for ferrous).
+3. The alloy combo is filled from `METAL_DEFAULTS` — no other UI changes.
 
 ### Add a new gating component
 
-1. Add the display name string to the checkbox list in `MainWindow._build_ui()`
-   (`ui/main_window.py`).
-2. Add rendering logic in `Viewport3D._draw_gating()` (matplotlib path) in
-   `viewport/viewport.py`, and optionally in `_render_pyvista()`.
-3. If it affects flow area, add a branch in
-   `SimWorker._compute_fill_time_gating_hydraulics()` in `simulation/worker.py`.
-4. Expose its dimensions in `Viewport3D.get_gating_params()`.
+1. Checkbox name in `MainWindow._build_gating_panel()`.
+2. Draw in `_draw_gating()` and `_build_pv_gating_actors()`.
+3. Hydraulics in `SimWorker._compute_fill_time_gating_hydraulics()` if it
+   chokes flow; volume in `gating_volumes_cm3()`.
+4. `Viewport3D.get_gating_params()` and, if click-to-place, `place_gating()`.
+5. Include new fields in `_gating_state_key()` so PyVista/MPL caches rebuild.
+
+### Add a shop recipe
+
+Add a dict to `SHOP_RECIPES` with `metal`, `process` (`sand` / `shell` /
+`printed`), temps, and optional `shell_mm` / `printed_mm` / `gating_ratio`.
+`MainWindow._on_recipe` applies it.
+
+### Add a casting process
+
+1. `MOLD_TYPES` factor + `is_*` / `process_kind()` in `foundry.py`.
+2. Process button + Flask-panel box in `MainWindow`.
+3. `Viewport3D.set_mold_process` + envelope draw.
+4. Worker: skip flask/burn-on where appropriate; `sand_mix_ticket` branch.
+5. Tests in `test_foundry.py` / `test_shop.py`.
+
+Do not emit a process-wide warning on every sim (verdict becomes `risky`).
 
 ### Run a quick sanity check (no GUI)
 
@@ -176,5 +240,5 @@ result = {}
 w = SimWorker({"metal": "A356 Aluminum", "vol_cm3": 200, "surf_cm2": 180})
 w.finished.connect(result.update)
 w.run()
-print(result)
+print(result["process"], result["sand_mix"], result["verdict"])
 ```

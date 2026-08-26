@@ -1,9 +1,10 @@
 # Sand Casting Simulator
 
-A desktop tool for hobbyist and small-shop foundry work. Load an STL part file,
-configure your gating system and metal, and run a physics-based simulation that
-estimates fill time, solidification time, and flags common casting defects — all
-in a real-time 3D viewer.
+A desktop tool for hobbyist and small-shop foundry work. Load an STL part,
+pick a process (green/resin sand, ceramic shell, or binder-jet printed sand),
+place gating, and run a physics-based simulation that estimates fill time,
+solidification time, melt/sand tickets, and defect risk — all in a real-time
+3D viewer.
 
 ---
 
@@ -15,49 +16,71 @@ in a real-time 3D viewer.
 4. [Running the App](#running-the-app)
 5. [Quick Start — One-Click Demo](#quick-start--one-click-demo)
 6. [User Interface Walkthrough](#user-interface-walkthrough)
-7. [Simulation Physics](#simulation-physics)
-8. [Supported Metals](#supported-metals)
-9. [Gating System Components](#gating-system-components)
-10. [STL File Handling](#stl-file-handling)
-11. [Rendering Backends](#rendering-backends)
-12. [Adding a New Metal](#adding-a-new-metal)
-13. [Adding a New Gating Component](#adding-a-new-gating-component)
-14. [Running Tests](#running-tests)
-15. [Running a Headless Sanity Check](#running-a-headless-sanity-check)
-16. [Building a Standalone Executable](#building-a-standalone-executable)
-17. [Project Structure](#project-structure)
-18. [Known Limitations](#known-limitations)
-19. [Troubleshooting](#troubleshooting)
+7. [Casting Processes](#casting-processes)
+8. [Simulation Physics](#simulation-physics)
+9. [Supported Metals](#supported-metals)
+10. [Gating System Components](#gating-system-components)
+11. [Shop Tools](#shop-tools)
+12. [STL File Handling](#stl-file-handling)
+13. [Rendering Backends](#rendering-backends)
+14. [Adding a New Metal](#adding-a-new-metal)
+15. [Adding a New Gating Component](#adding-a-new-gating-component)
+16. [Running Tests](#running-tests)
+17. [Running a Headless Sanity Check](#running-a-headless-sanity-check)
+18. [Building a Standalone Executable](#building-a-standalone-executable)
+19. [Project Structure](#project-structure)
+20. [Known Limitations](#known-limitations)
+21. [Troubleshooting](#troubleshooting)
 
 ---
 
 ## Features
 
-- **One-click demo** — pre-built Motor Mount Bracket on the top bar
+- **One-click demo** — Motor Mount Bracket on the top bar, gating already placed
 - **STL / OBJ import** — drag-and-drop, millimetre or inch units, degenerate-triangle
   cleanup, winding repair, QEM decimation to 25,000 triangles, and thin-wall detection
-- **Top-bar workflow** — Load, Simulate, Save/Open `.cast.json` sessions, recents, Undo (Ctrl+Z)
-- **Gating as a layout tool** — click a piece in 3D to edit it; snap to the part silhouette;
-  1:2:2 / 1:4:4 area-ratio presets; choke ring at the restrictive section
-- **Fill animation** — metal spreads from the gate (distance order), with a fill/solidify clock
+- **Three shop processes** — sand flask, ceramic shell (investment / lost-wax),
+  binder-jet printed sand (no flask, no draft)
+- **Shop recipes** — named templates (A356 green sand, A356 ceramic shell,
+  A356 printed sand, bronze, gray iron) that set metal, process, and temps
+- **Top-bar workflow** — Open part, Simulate pour, Save/Open `.cast.json` jobs,
+  recents, Undo (Ctrl+Z), Export, Traveler PDF
+- **Click-to-gate** — click a face to drop sprue, fan gate, riser, chill,
+  foam filter, or a second gate
+- **Rigging wizard** — sizes sprue, runner, gate, riser, neck, and pour basin
+  for the current metal and part
+- **Gating as a layout tool** — click a piece in 3D to edit it; snap to the part
+  silhouette; 1:2:2 / 1:4:4 area-ratio presets; choke ring at the restrictive section
+- **Extra tree parts** — pour basin, ceramic foam filter, second gate, blind
+  riser + neck, insulating sleeve
+- **Fill animation** — metal spreads from the gate (distance order), with a fill clock
 - **Solidification animation** — freeze order follows local wall thickness (thin first)
+- **Solid-fraction slider** — scrub 0–1 after a pour; feeding is treated as
+  stopped at ~70 % solid
+- **Result layers** — hot-spot thickness, last-to-freeze, fill order, porosity,
+  Niyama proxy, X-ray (ghosted skin + interior voxels)
+- **Cut plane** — clip the mesh along X/Y/Z
+- **Coarse voxels** — gravity flood, freeze ranking, isolated-liquid porosity,
+  Niyama proxy, chills, and sleeve (SOLIDCast-class, not CFD)
 - **Physics simulation** (background thread):
-  - Solidification time via Chvorinov's Rule (metal properties × mould type,
-    including ceramic-shell thickness and preheat)
-  - Fill time via Bernoulli gating hydraulics using the most-restrictive cross-section
+  - Solidification time via Chvorinov's Rule (metal × mould type, including
+    ceramic-shell thickness/preheat and printed-sand factor)
+  - Fill time via Bernoulli hydraulics at the most-restrictive section
+    (sprue exit, runner, gate(s), or foam filter)
   - Casting yield and melt mass including gating metal
-  - Riser modulus check vs hot-spot V/A
-  - Defect risk detection: misrun, cold shut, burn-on, low superheat, flask overflow,
-    cold/thin ceramic shell
-- **Actionable results** — Likely OK / Risky / Will probably fail, with click-to-fly fixes
+  - Open/blind riser modulus vs hot-spot V/A, plus neck freeze-off
+  - Defect risk: misrun, cold shut, burn-on (sand), low superheat, flask overflow,
+    cold/thin ceramic shell, isolated-liquid porosity, mold erosion
+- **Actionable results** — Likely OK / Risky / Will probably fail, with
+  click-to-fly “what to change” links
+- **Melt / pattern / sand-mix tickets** — ingots and furnace fit; shrink-compensated
+  pattern STL; lb sand + clay/water or resin; printed-sand print box + vents
+- **Shop traveler PDF** — one page: viewport screenshot, verdict, tickets, fixes
+- **Keep as A** — store a pour (text deltas + screenshot thumbnail) and compare
+  a second setup
 - **Foundry checks** — draft overlay, undercut/core-print overlay, auto flask fit
-- **Ceramic shell (investment / lost-wax)** — fired-shell thickness, shell preheat,
-  no sand flask, envelope overlay in the viewport
 - **Pattern vs as-cast** — shrinkage scale with a toggle to preview the frozen part
-- **Defect markers** — coloured spheres rendered at risk locations after simulation
-- **Shrinkage compensation** — configurable scale factor per metal
-- **GPU array acceleration** — CuPy replaces NumPy transparently on CUDA GPUs;
-  falls back to NumPy automatically when unavailable
+- **GPU array acceleration** — CuPy replaces NumPy on CUDA GPUs; falls back to NumPy
 - **Dark theme** — Catppuccin Mocha palette throughout
 - **Windows launcher** (`run.bat`) with automatic dependency installation
 
@@ -134,142 +157,138 @@ requirements automatically if missing, then launches the app.
 No STL file required to try the app.
 
 1. Launch the app (`python casting_sim.py` or `run.bat` on Windows).
-2. Click the green **▶ Try Demo** button in the *STL File* panel.
-3. A Motor Mount Bracket appears in the viewport with all settings
-   pre-configured (A356 Aluminum, 10×12 flask, full gating system).
-4. Click **Simulate Pour** in the right panel.
-5. Watch the fill animation, solidification animation, and defect markers.
+2. Click **Try demo** on the top bar.
+3. A Motor Mount Bracket appears with gating already placed (A356, 10×12 flask).
+4. Click **Simulate pour**.
+5. Watch fill, then solidification, then defect markers.
 6. Review the results — the demo is tuned to trigger cold-shut and low-superheat
    warnings so you can see how defect detection works.
 
+Optional next clicks:
+
+- **Process → Printed sand** (or **Ceramic shell**) and simulate again
+- **Size sprue, runner, gate, riser** to auto-rig the tree
+- **Keep as A**, change a gate, simulate, and read the COMPARE block
+- **Traveler PDF** for a one-page shop sheet
+- **Foundry checks → Result layer → X-ray** after a pour, then scrub
+  **Solid fraction**
+
 The Motor Mount Bracket is a procedurally generated part with a wide thin base
 plate, a thick central body, a cylindrical boss, two thin mounting ears, and two
-web ribs — deliberately mixing section thicknesses to exercise every part of the
-physics engine.
+web ribs — mixing section thicknesses to exercise the physics.
 
 ---
 
 ## User Interface Walkthrough
 
-The window is divided into three panels:
+The window is divided into three columns plus a top chrome bar:
 
-| Panel | Contents |
+| Area | Contents |
 |---|---|
-| **Left** | Collapsible control panels |
-| **Centre** | 3D viewport + view preset buttons |
-| **Right** | Simulation results, Simulate and Reset buttons |
+| **Top bar** | Try demo, Open part, Simulate pour, Reset, Save/Open job, Export, Traveler PDF |
+| **Left** | Collapsible setup panels (scrollable) |
+| **Centre** | 3D viewport |
+| **Right** | View presets, Keep as A / Clear A, results |
 
-### 1 — Load a Part
+### 1 — Load a part
 
-**Option A — Load your own STL file**
-Click **Load STL…** in the *STL File* panel and choose any binary or ASCII `.stl`
-file. The part appears in the 3D viewport immediately. Volume and surface area are
-shown beneath the button. You can load multiple STL files; each becomes a
-separately movable model.
+Drop an STL or OBJ on the window, click **Open part…**, or **Try demo**.
+Set **Import units** (millimetres or inches) before opening a file.
+Volume, surface area, and thin-wall notes appear in the **Part** panel.
+Recent jobs and meshes are listed underneath.
 
-**Option B — Use the built-in demo**
-Click **▶ Try Demo** to load the pre-built Motor Mount Bracket with all settings
-pre-configured. See [Quick Start](#quick-start--one-click-demo) above.
+### 2 — Pick a process
 
-### 2 — Set the Parting Line
+**Process** has three buttons: **Sand mold**, **Ceramic shell**, **Printed sand**.
+**Shop recipe** applies a named metal + process + temperature template.
 
-The **Parting Line** slider sets where the mould splits, as a percentage of the
-part's total height (5 %–95 %). The blue horizontal plane in the viewport updates
-live. Faces above the parting line are shown in blue (cope half); faces below in
-brown (drag half).
+See [Casting Processes](#casting-processes).
 
-### 3 — Flask or ceramic shell
+### 3 — Place gating
 
-**Sand molds** — pick a standard flask from the **Flask** drop-down (6×6 through
-14×20 inches) or click **+ Custom**. Auto-fit chooses the smallest preset that
-clears the part. The dashed outline in the viewport is the flask.
+Click **Sprue**, **Gate**, **Riser**, **Chill**, **Filter**, or **Gate 2**, then
+click a face in the viewport. Or tick components and use **Size sprue, runner,
+gate, riser**. Ratio presets (1:2:2 non-ferrous, 1:4:4 ferrous) and **Snap to
+part** sit under the checkboxes. Click a drawn piece to show its dimension sliders.
 
-**Ceramic shell** — under **Mold**, choose **Ceramic shell**. The flask panel
-becomes fired-shell thickness (4–16 mm) and **Shell preheat**. The viewport
-draws a ceramic envelope around the part instead of a sand flask. Typical
-preheat is ~1100 °F for A356 and ~1600–1900 °F for bronze, iron, and stainless.
+### 4 — Metal and temperatures
 
-### 4 — Configure the Gating System
+- **Alloy** — A356, Everdur bronze, gray iron, ductile iron, 316 stainless
+- **Sand type** — green, dry, or resin (sand process only)
+- **Pour temp** — recommended band is shown under the spin box
+- **Mold temp** / **Shell preheat** — sand/printed vs fired shell
+- **Thin wall** — Auto / No / Yes (Auto uses local mesh thickness < 6 mm)
 
-Check any combination of components in the **Gating System** panel:
+### 5 — Flask, shell, or print box
 
-- **Tapered Sprue** — vertical tapered channel that carries metal from the top of
-  the cope down to the parting line.
-- **Runner (Horizontal)** — horizontal channel at the parting line that distributes
-  metal across to the gate.
-- **Fan Gate** — flattened gate at the parting line that spreads the metal stream
-  into the mould cavity.
-- **Riser (Open)** — cylindrical reservoir above the parting line that feeds
-  shrinkage during solidification.
+The **Flask** panel retitles itself:
 
-Use the **Gating Placement** sliders to position the sprue and riser in X/Y, or
-drag them directly in the 3D viewport by clicking near the component.
-
-### 5 — Select Metal and Temperature
-
-The **Metal & Temperature** panel provides:
-
-- **Metal** drop-down — A356 Aluminum or Everdur Bronze; pour temperature and
-  shrinkage defaults update automatically.
-- **Mold** drop-down — Green sand, dry sand, resin/no-bake, or ceramic shell
-  (investment / lost-wax).
-- **Pour Temp** spin box (800–3,200 °F) — override the metal's default pour
-  temperature. The range covers aluminium through stainless steel.
-- **Mold Temp** (sand, 32–400 °F) — mould pre-heat; values above 120 °F trigger
-  a burn-on warning.
-- **Shell preheat** (ceramic shell, 200–2,200 °F) — fired-shell temperature at
-  pour. A hot shell fills thin walls more easily and freezes slower than a
-  cold shell. Burn-on does not apply.
-- **Thin Wall?** — flag that tightens the cold-shut superheat threshold.
-
-### 6 — Position the Model
-
-The **Model Placement** sliders move and rotate the active model:
-
-| Slider | Range | Effect |
+| Process | Panel | Controls |
 |---|---|---|
-| X Offset | ±500 mm | Translate along X |
-| Y Offset | ±500 mm | Translate along Y |
-| Z Offset | ±200 mm | Translate along Z |
-| Rotation | 0–360 ° | Rotate about the Z axis |
+| Sand | Flask | Preset, custom, auto-fit, stack height |
+| Ceramic shell | Ceramic shell | Fired thickness 4–16 mm (default 8 mm) |
+| Printed sand | Print box | Wall 8–40 mm (default 15 mm) and a vent hint |
 
-You can also drag the model directly in the 3D viewport.
+Parting-line plane is still the sprue/gate height on shell and printed sand
+(there is no cope/drag split).
 
-### 7 — Shrinkage Compensation
+### 6 — Foundry checks and result layers
 
-The **Shrinkage Compensation** slider adjusts the scale factor applied to the
-part geometry (100 %–110 %). The label shows the metal's nominal shrinkage
-percentage so you can match your pattern allowance to the simulation.
+- Draft overlay (red = lock). Printed sand treats draft as optional.
+- Undercut / core-print overlay
+- Hot-spot overlay (thickness)
+- **Result layer** after a sim: last-to-freeze, fill order, porosity,
+  Niyama proxy, **X-ray (interior)**
+- **Cut plane** along X/Y/Z
+- **Solid fraction** slider (feeding stops ~70 %)
 
-### 8 — Run the Simulation
+### 7 — Shrinkage and pattern STL
 
-Click **Simulate Pour**. The progress bar tracks five stages:
+The shrinkage slider is a print scale (100–110 → ×1.00–1.10).
+**Show as-cast** previews the frozen part without pattern oversize.
+**Export pattern STL…** writes the mesh at that scale for lost-PLA / 3D-print patterns.
+
+### 8 — Run the simulation
+
+**Simulate pour** runs in a background thread:
 
 1. Geometry ratios
 2. Chvorinov's Rule
 3. Defect risk checks
 4. Gating hydraulics
-5. Assembling results
+5. Voxel fill / freeze
+6. Assembling results (tickets, verdict, fixes)
 
-When complete:
+Results show KPIs (fill, solidify, yield), melt / sand-mix / pattern tickets,
+COMPARE if A is stored, and clickable **What to change** lines.
 
-- The results panel shows fill time, solidification time, V/S ratio, and any
-  defect warnings.
-- The fill animation plays — metal rises from the bottom, coloured by temperature.
-- The solidification animation follows — heat front sweeps inward.
-- Defect markers appear at risk locations: **red** = shrinkage risk,
-  **yellow** = cold shut risk.
+### 9 — Compare and traveler
 
-### 9 — Reset
+**Keep as A** stores the last result plus a viewport thumbnail. Change the
+setup, simulate again, and the results panel lists A → B deltas.
 
-Click **Reset** to stop all animations, clear the results panel, uncheck all
-gating components, and return all sliders to their defaults.
+**Traveler PDF** writes a one-page light-themed sheet: screenshot, verdict,
+tickets, and what to change.
 
-### 10 — View Presets
+**Export** can still write HTML, PDF of the results, or a PNG screenshot.
 
-The seven buttons at the top of the centre panel (Top, Bottom, Front, Back, Left,
-Right, Iso) snap the camera to standard orthographic and isometric positions. The
-scroll wheel zooms in the Matplotlib backend.
+---
+
+## Casting Processes
+
+| Process | Mould factor (cold) | Flask? | Draft? | Notes |
+|---|---|---|---|---|
+| Green sand | 1.00 | Yes | Yes | Clay + water mix ticket |
+| Dry sand | 1.15 | Yes | Yes | Slower freeze than green |
+| Resin / no-bake | 0.85 | Yes | Yes | Sand + resin binder ticket |
+| Ceramic shell | 0.62 at 8 mm cold | No | Optional (wax die) | Preheat + thickness scale Chvorinov B |
+| Printed sand | 0.90 | No | No | Print-box wall, vents, furan binder |
+
+Typical fired-shell preheat: A356 ~1100 °F; bronze ~1600 °F; iron ~1800 °F;
+316 stainless ~1900 °F.
+
+Printed sand skips flask-too-small and burn-on warnings. Undercuts are fine
+(the binder-jet has no pull). Add vents so air can leave the print box.
 
 ---
 
@@ -292,9 +311,11 @@ t_solidify = B × (V / A)²
 A356 at its catalogue pour temperature has `(H / H_A356) × (k_A356 / k) = 1`,
 so its freeze time matches the original `B = 3.0 × mold_constant` scale. Other
 alloys pick up density, specific heat, latent heat, and conductivity. Pour mass
-is `volume × density` (grams). `mold_factor` is 1.00 green sand, 1.15 dry sand,
-0.85 resin/no-bake. Ceramic shell starts at 0.62 for a cold 8 mm shell, then
-scales with fired thickness and preheat (hot shells freeze slower).
+is `volume × density` (grams).
+
+`mold_factor` is 1.00 green sand, 1.15 dry sand, 0.85 resin/no-bake, 0.90
+printed sand. Ceramic shell starts at 0.62 for a cold 8 mm shell, then scales
+with fired thickness and preheat (hot shells freeze slower).
 
 ### Fill Time — Bernoulli Gating Hydraulics
 
@@ -311,26 +332,50 @@ t_fill = V / Q
 |---|---|
 | `Cd` | Discharge coefficient = 0.75 |
 | `g` | Gravitational acceleration = 9,806.65 mm/s² |
-| `h` | Effective sprue head = 100 mm |
+| `h` | Sprue height plus cope height above the parting plane |
 | `A_effective` | Area of the most restrictive element (mm²) |
 
-**Restriction priority** — among every enabled component, the smallest area wins:
+**Restriction candidates** — the smallest area wins:
 
 1. Tapered sprue → exit (bottom) area
-2. Horizontal runner → rectangular width × height (10 × 8 mm)
-3. Fan gate → hydraulic area (default 40 mm²)
-4. No gating → fallback: `max(3.0 s, volume_cm³ / 80.0)`
+2. Horizontal runner → width × height
+3. Fan gate → hydraulic area (×2 if Second Gate is on)
+4. Foam filter → face area × 0.35 (≈ 10 ppi open area)
+5. No gating → fallback: `max(3.0 s, volume_cm³ / 80.0)`
 
-Fill time is clamped to a minimum of 1.5 s.
+Fill time is clamped to a minimum of 1.5 s. Gate velocity above 500 mm/s
+(sand / printed) or 750 mm/s (shell) flags mold-erosion risk.
+
+### Voxels (coarse fill / freeze)
+
+After the 0-D checks, a ~32³ occupancy grid:
+
+1. Rasterizes the STL
+2. Gravity-floods from the gate
+3. Ranks freeze time as `B × (distance-to-mold)²`
+4. Marks isolated liquid (no feeder path) as porosity
+5. Builds a Niyama proxy `t / (|∇t| + ε)`
+6. Maps fields onto mesh faces and X-ray point clouds
+
+Chills locally shorten freeze distance; an insulating sleeve lengthens it
+around the riser. This is hobby-desktop SOLIDCast-class work, not MAGMA CFD.
+
+Feeding is treated as stopped at solid fraction **0.70** (`FEEDING_STOP_FRAC`).
 
 ### Defect Detection
 
 | Condition | Category | Flag |
 |---|---|---|
-| Superheat < 50 °F | Defect | Misrun risk |
-| Thin wall AND pour temp < melt temp + 150 °F | Defect | Cold shut risk |
-| Mould temp > 120 °F | Warning | Burn-on warning |
-| Superheat < 100 °F | Warning | Low superheat |
+| Superheat below the alloy minimum | Defect | Misrun risk |
+| Thin wall AND pour temp < melt + 150 °F (sand / printed; relaxed on a hot shell) | Defect | Cold shut risk |
+| Isolated-liquid fraction ≥ 5 % | Defect | Shrinkage porosity |
+| Mould temp > 120 °F (sand only) | Warning | Burn-on |
+| Superheat < 2× minimum | Warning | Low superheat |
+| Flask smaller than the part envelope (sand only) | Warning | Flask too small |
+| Cold or thin ceramic shell | Warning / defect | Preheat / breakthrough |
+| Riser modulus < 1.2 × part V/A | Warning | Riser may freeze first |
+| Blind / pinched riser neck | Warning | Neck freeze-off |
+| Gravity flood never reaches a lobe | Warning | Misrun (unfilled) |
 
 *Superheat* = pour temperature − liquidus temperature.
 
@@ -353,42 +398,82 @@ See [Adding a New Metal](#adding-a-new-metal) to extend this list.
 ## Gating System Components
 
 ### Tapered Sprue
-Vertical channel, wider at top (7.5 mm radius) and narrower at bottom (4.0 mm).
-The taper compensates for metal acceleration under gravity, keeping the channel
-full and preventing air aspiration. Rendered in orange.
+Vertical channel, wider at the basin and narrower at the runner. The taper
+keeps the channel full and prevents air aspiration. Rendered in orange.
 
 ### Runner (Horizontal)
-Rectangular channel (160 × 10 × 8 mm) at the parting line distributing metal
-from the sprue base to the gate. Rendered in gold.
+Rectangular channel at the parting line from the sprue base toward the gate.
+Rendered in gold.
 
 ### Fan Gate
-Flat rectangular gate (60 × 8 × 6 mm) at the parting line that spreads the
-metal stream. Default hydraulic area is 40 mm². Rendered in green.
+Flat gate at the parting line. Default hydraulic area is 40 mm². Rendered in green.
 
-### Riser (Open)
-Cylindrical reservoir (20 mm radius, 60 mm tall) above the parting line.
-Feeds volumetric shrinkage during solidification and vents gas. Rendered in blue.
+### Second Gate
+A second fan-gate copy (click **Gate 2**). Doubles gate area in the hydraulics
+and in gating metal volume.
+
+### Foam Filter
+Ceramic foam block on the runner. Open area is modelled as 35 % of face area
+and can become the choke.
+
+### Pour Basin
+Cup on top of the sprue (wizard enables it). Adds basin metal to the melt ticket.
+
+### Riser (Open) / Blind riser + neck
+Cylindrical feeder above the parting line. **Blind riser** caps the top (extra
+cooling face — size it larger). **Neck** is the short cylinder into the casting;
+modulus uses the lateral surface only (ends sit on the riser and the hot spot).
+**Insulating sleeve** slows freeze around the riser in the voxel pass.
+
+### Chill
+Click **Chill** then a thick section. Shortens local freeze distance.
+
+---
+
+## Shop Tools
+
+| Tool | Where | What it does |
+|---|---|---|
+| Shop recipe | Process panel | Metal + process + temps in one click |
+| Rigging wizard | Gating panel | Sizes the tree for a ~6 s fill and riser modulus ≥ 1.25 × V/A |
+| Melt ticket | Results | Pour weight, ingot count, furnace fit, alloy $ |
+| Sand mix ticket | Results | Flask sand + clay/water or resin; printed box + binder + vents; shell is slurry/stucco |
+| Pattern ticket | Results + **Export pattern STL…** | Shrink scale for a 3D-printed pattern |
+| Keep as A | Results column | Screenshot + numeric deltas vs the next pour |
+| Traveler PDF | Top bar | One-page shop sheet |
+| Session | Save job / Open job | `.cast.json` including process, printed wall, blind/neck |
+
+Named recipes in `SHOP_RECIPES` (`constants.py`):
+
+- A356 green sand
+- A356 ceramic shell
+- A356 printed sand
+- Bronze green sand
+- Bronze ceramic shell
+- Gray iron sand
 
 ---
 
 ## STL File Handling
 
-`Viewport3D.load_stl()` runs three clean-up passes on every imported file:
+`Viewport3D.load_stl()` runs these clean-up passes on every imported file:
 
 1. **Degenerate triangle removal** — strips triangles whose vertices contain
    NaN/Inf, or whose area is ≤ 1×10⁻¹⁰ mm².
 2. **Deduplication** — removes triangles with identical centroids (rounded to
    6 decimal places).
-3. **Decimation** — if more than 25,000 triangles remain, a uniform stride
-   keeps every Nth triangle. Fine detail on very complex meshes may be lost.
+3. **Winding repair** — inverts faces when signed volume is negative.
+4. **Decimation** — Garland–Heckbert QEM to at most 25,000 triangles
+   (grid clustering only if QEM cannot reach the budget).
 
 Geometry statistics use a single vectorised NumPy pass:
 
 - **Volume** — divergence theorem: `V = |Σ v₀·(v₁×v₂)| / 6`
 - **Surface area** — `A = Σ ‖(v₁−v₀)×(v₂−v₀)‖ / 2`
+- **Local thickness** — Auto thin-wall flag when min wall < 6 mm
 
-Both formulas assume a closed, consistently wound mesh. Clean your STL with
-Meshmixer or PrusaSlicer before importing if you get unexpected geometry values.
+Both volume and area assume a closed, consistently wound mesh. Clean your STL
+with Meshmixer or PrusaSlicer before importing if you get unexpected values.
 
 ---
 
@@ -408,10 +493,9 @@ Activated when `pyvista` and `pyvistaqt` are both importable.
 ### Matplotlib 3D (fallback)
 Used when PyVista is unavailable.
 
-- Software-rendered `Poly3DCollection` with per-face vectorised Phong shading
+- Software-rendered `Poly3DCollection`
 - Persistent collections — model geometry is not cleared between frames;
   only fill/particle overlays are removed per step
-- Three-light rig (key, fill, rim) computed with a single matrix multiply
 - Scroll-wheel zoom; click-drag to reposition models and gating
 - `FigureCanvasQTAgg` embedded in a `QVBoxLayout`
 
@@ -432,33 +516,36 @@ METAL_DEFAULTS["Gray Iron (ASTM A48)"] = {
     "color":          "#888888",
     "mold_constant":  1.6,
     "shrinkage_pct":  1.0,
+    "min_superheat_f": 100,
 }
 ```
 
-Optionally add a matching entry to `METAL_PBR` in `constants.py` for PyVista
-PBR rendering:
+Optionally add matching entries to `METAL_PBR` (PyVista), `SHELL_PREHEAT_DEFAULT_F`,
+and `ALLOY_USD_PER_LB`. Ferrous alloys should also be listed in `FERROUS_METALS`
+so the wizard picks 1:4:4.
 
-```python
-METAL_PBR["Gray Iron (ASTM A48)"] = {
-    "color": "#888888", "metallic": 0.6, "roughness": 0.5
-}
-```
-
-The metal appears in the **Metal** drop-down automatically — `_build_ui()`
-iterates over `METAL_DEFAULTS` to populate the combo box.
+The metal appears in the **Alloy** drop-down automatically — the combo box is
+filled from `METAL_DEFAULTS`.
 
 ---
 
 ## Adding a New Gating Component
 
-1. Add the display name string to the checkbox list in `MainWindow._build_ui()`
+1. Add the display name to the checkbox list in `MainWindow._build_gating_panel()`
    (`ui/main_window.py`).
-2. Add a rendering block inside `Viewport3D._draw_gating()` (Matplotlib path)
-   and optionally inside `_render_pyvista()` in `viewport/viewport.py`.
-3. If the component affects flow area, add a branch in
-   `SimWorker._compute_fill_time_gating_hydraulics()` in `simulation/worker.py`.
-4. Expose its dimensions in `Viewport3D.get_gating_params()` so the worker
-   receives the correct cross-section area.
+2. Draw it in `Viewport3D._draw_gating()` (Matplotlib) and
+   `Viewport3D._build_pv_gating_actors()` (PyVista).
+3. If it affects flow area or metal volume, add a branch in
+   `SimWorker._compute_fill_time_gating_hydraulics()` and
+   `gating_volumes_cm3()` (`simulation/foundry.py`).
+4. Expose dimensions in `Viewport3D.get_gating_params()`.
+5. If it is click-to-place, add a pick mode in `Viewport3D.place_gating()`.
+
+### Adding a shop recipe
+
+Add a dict to `SHOP_RECIPES` in `constants.py` with `metal`, `process`
+(`sand` / `shell` / `printed`), temps, and optional `shell_mm` / `printed_mm` /
+`gating_ratio`. The Process combo box picks it up automatically.
 
 ---
 
@@ -466,16 +553,23 @@ iterates over `METAL_DEFAULTS` to populate the combo box.
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest tests/
+QT_QPA_PLATFORM=offscreen python -m pytest tests/
 ```
 
-All tests are headless (`QT_QPA_PLATFORM=offscreen`; no display required).
+All tests are headless (no display required). `tests/conftest.py` sets
+`QT_QPA_PLATFORM=offscreen`. Only `test_simulation.py` needs a QApplication
+(created automatically in that file).
 
-| Test file | Coverage |
-|---|---|
-| `tests/test_simulation.py` | SimWorker physics |
-| `tests/test_formatter.py` | `build_results_text()` output format |
-| `tests/test_geometry.py` | Geometry helpers and mesh generators |
+| Test file | Coverage | Count |
+|---|---|---|
+| `tests/test_simulation.py` | SimWorker physics | 44 |
+| `tests/test_formatter.py` | Results HTML, traveler, tickets | 53 |
+| `tests/test_geometry.py` | Mesh helpers and generators | 46 |
+| `tests/test_foundry.py` | Yield, riser/neck, processes, session | 42 |
+| `tests/test_shop.py` | Recipes, wizard, melt/pattern/sand-mix | 19 |
+| `tests/test_voxels.py` | Occupancy, flood, freeze, porosity | 10 |
+
+**214 tests** at last count.
 
 ---
 
@@ -493,6 +587,7 @@ w = SimWorker({
     "surf_cm2":      180.0,
     "pour_temp_f":   1300,
     "mold_temp_f":   77,
+    "mold_type":     "Green sand",
     "gating_params": {
         "has_sprue":      True,
         "has_gate":       True,
@@ -506,7 +601,19 @@ w.run()
 
 print(f"Fill time : {result['fill_time_s']:.1f} s  ({result['restrictive_elem']})")
 print(f"Solidify  : {result['t_solidify_min']:.2f} min")
+print(f"Process   : {result['process']}")
+print(f"Sand mix  : {result['sand_mix']['hint']}")
 print(f"Defects   : {result['defects'] or 'none'}")
+```
+
+Printed sand (no flask warning even if `flask_fit` fails):
+
+```python
+w = SimWorker({
+    "metal": "A356 Aluminum", "vol_cm3": 200, "surf_cm2": 180,
+    "mold_type": "Printed sand", "printed_mm": 15,
+    "bbox_mm": (80, 60, 40),
+})
 ```
 
 Or use the demo part directly:
@@ -546,36 +653,42 @@ Output: `dist/SandCastingSim_GPU/SandCastingSim.exe`.
 ```
 sand_casting_v2/
 ├── casting_sim.py              # Entry point — calls main()
-├── constants.py                # METAL_DEFAULTS, FLASK_SIZES, METAL_PBR, colour constants
-├── requirements.txt            # Mandatory Python dependencies
-├── README.md                   # This file
-├── CLAUDE.md                   # Developer guide for Claude Code sessions
-├── run.bat                     # Windows launcher (auto-installs deps)
-├── build_exe.bat               # PyInstaller CPU/folder build (run on Windows)
-├── build_gpu.bat               # PyInstaller PyVista/VTK GPU build (run on Windows)
-├── SandCastingSim.spec
-├── SandCastingSim_GPU.spec
+├── constants.py                # Metals, moulds, recipes, colours
+├── requirements.txt
+├── requirements-dev.txt
+├── README.md
+├── CLAUDE.md                   # Developer guide for coding agents
+├── run.bat
+├── build_exe.bat / build_gpu.bat
 │
 ├── ui/
-│   ├── style.py                # APP_STYLE QSS (Catppuccin Mocha dark theme)
-│   ├── collapsible.py          # CollapsiblePanel widget
-│   ├── main_window.py          # MainWindow — UI layout, signal wiring, event handlers
-│   └── demo_part.py            # build_demo_mesh() — procedural Motor Mount Bracket
+│   ├── style.py                # APP_STYLE QSS
+│   ├── collapsible.py          # CollapsiblePanel
+│   ├── main_window.py          # Layout, signals, sessions, traveler
+│   └── demo_part.py            # Motor Mount Bracket mesh
 │
 ├── simulation/
-│   ├── worker.py               # SimWorker — physics calculations in a QThread
-│   └── mesh_tools.py           # Watertight check, QEM decimation, local thickness
+│   ├── worker.py               # SimWorker — Chvorinov, hydraulics, voxels
+│   ├── foundry.py              # Yield, riser/neck, draft, flask, verdicts
+│   ├── shop.py                 # Recipes, wizard, melt/sand/pattern tickets
+│   ├── voxels.py               # Coarse fill / freeze / porosity / Niyama
+│   ├── session.py              # .cast.json + recents
+│   └── mesh_tools.py           # QEM, thickness, defect sites
 │
 ├── viewport/
-│   └── viewport.py             # Viewport3D — 3D rendering, STL loading, animation
+│   └── viewport.py             # Viewport3D — PyVista or matplotlib
 │
 ├── results/
-│   └── formatter.py            # build_results_text() — formats result dict → text
+│   └── formatter.py            # Results HTML + shop traveler HTML
 │
 └── tests/
-    ├── test_simulation.py      # SimWorker physics (30 tests)
-    ├── test_formatter.py       # build_results_text output format (27 tests)
-    └── test_geometry.py        # Geometry helpers and mesh generators (37 tests)
+    ├── conftest.py             # QT_QPA_PLATFORM=offscreen
+    ├── test_simulation.py
+    ├── test_formatter.py
+    ├── test_geometry.py
+    ├── test_foundry.py
+    ├── test_shop.py
+    └── test_voxels.py
 ```
 
 ---
@@ -587,17 +700,19 @@ sand_casting_v2/
   values.
 - **QEM decimation** — Garland–Heckbert edge collapse to 25,000 triangles;
   grid clustering is only used if QEM cannot reach the budget.
-- **Single parting line** — sand molds are a simple two-part cope/drag split.
-  Ceramic shell has no cope/drag; the plane is only sprue/gate height. Multi-part
-  moulds and sand cores are not modelled.
+- **Single parting line** — sand molds are a two-part cope/drag split.
+  Ceramic shell and printed sand have no cope/drag; the plane is only
+  sprue/gate height. Multi-part moulds and sand cores are not modelled.
+- **Voxels are coarse** — ~32³ cells, gravity flood, no turbulence, no
+  microstructure, no stress. Isolated-liquid porosity is a feeder-path
+  proxy, not a shrink-cavity CFD result.
 - **Isothermal fill assumption** — metal is treated as a single-temperature
   incompressible fluid. Partial solidification during fill is captured only by
-  the rule-based cold-shut warning. The fill overlay still rises with height.
+  the rule-based cold-shut warning.
 - **Sprue head** — hydraulic head is the visible basin height plus cope height
-  (parting line up to the part top). The sprue mesh spans the parting plane to
-  the pouring basin so it meets the runner.
+  (parting line up to the part top).
 - **Flask height** — XY flask presets are inches in plan; stack height is a
-  separate control (default 6 in).
+  separate control (default 6 in). Printed sand uses a print-box wall instead.
 - **PyVista drag interaction** — click-drag of the sprue, riser, and model works
   in both Matplotlib and PyVista. Camera rotate still uses the default VTK
   interactor when you are not near a gating component.
@@ -623,7 +738,13 @@ The mesh is not watertight or has reversed normals. Repair with Meshmixer
 
 **Fill time is unrealistically long**
 Check that at least one gating component is ticked. Without gating the fallback
-formula (`max(3 s, volume / 80 cm³/s)`) is used.
+formula (`max(3 s, volume / 80 cm³/s)`) is used. A small foam filter (35 % open)
+can become the choke.
+
+**Printed sand still warns about draft**
+Draft overlay is optional on printed sand; the simulation does not scold for
+lock faces. Use **Foundry checks → Draft overlay** only if you care about a
+wax die / pattern, not the print box.
 
 **CuPy installed but not active**
 Confirm it loads independently: `python -c "import cupy; print(cupy.__version__)"`.
