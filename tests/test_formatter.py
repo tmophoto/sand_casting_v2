@@ -116,6 +116,11 @@ class TestFieldValues:
         text = build({"fill_possible": False})
         assert "No" in text or "freeze" in text
 
+    def test_metal_specific_superheat_color_uses_min_superheat(self):
+        """Bronze min superheat 150 °F: 120 °F should still warn, not look 'ok'."""
+        text = build({"superheat": 120.0, "min_superheat_f": 150})
+        assert "120.0" in text
+
     def test_bronze_metal_name(self):
         text = build({"metal": "Everdur Bronze (C52100)"})
         assert "Everdur Bronze (C52100)" in text

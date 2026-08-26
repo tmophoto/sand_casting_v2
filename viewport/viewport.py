@@ -73,11 +73,14 @@ class Viewport3D(QWidget):
         self.riser_offset  = np.array([60.0, 0.0])
 
 
-        # Gating dimensions (mm)
-        self.sprue_top_radius   = 7.5
+        # Gating dimensions (mm) — hydraulics must match the rendered mesh
+        self.sprue_top_radius    = 7.5
         self.sprue_bottom_radius = 4.0
-        self.runner_diameter    = 12.0
-        self.gate_area          = 40.0
+        self.runner_length       = 160.0
+        self.runner_width        = 10.0   # cross-section depth
+        self.runner_height       = 8.0    # cross-section height
+        self.runner_diameter     = 12.0   # legacy circular approx; unused when width/height set
+        self.gate_area           = 40.0
 
 
         self.pour_rate: float  = 1.0
@@ -330,6 +333,9 @@ class Viewport3D(QWidget):
         """
 
         verts = xp.asarray(mesh.vectors)
+        if verts.shape[0] == 0:
+            return {"vol_cm3": 0.0, "surf_cm2": 0.0, "z_min": 0.0, "z_max": 0.0}
+
         v0, v1, v2 = verts[:, 0], verts[:, 1], verts[:, 2]
 
         cross   = xp.cross(v1 - v0, v2 - v0)
@@ -340,6 +346,8 @@ class Viewport3D(QWidget):
         return {
             "vol_cm3":  vol_mm3  / 1000.0,
             "surf_cm2": area_mm2 / 100.0,
+            "z_min":    float(xp.min(verts[:, :, 2])),
+            "z_max":    float(xp.max(verts[:, :, 2])),
         }
 
 
@@ -769,8 +777,8 @@ class Viewport3D(QWidget):
             sx, sy = self.sprue_offset
             ry = sy + self.runner_y_offset
             faces = self._make_box_mesh(
-                cx=sx, cy=ry, z_bottom=z_part - 4.0,
-                width=160.0, depth=10.0, height=8.0,
+                cx=sx, cy=ry, z_bottom=z_part - self.runner_height / 2.0,
+                width=self.runner_length, depth=self.runner_width, height=self.runner_height,
             )
             self._add_pv_gating_mesh(faces, *_gating_colors["Runner (Horizontal)"])
 
@@ -859,8 +867,8 @@ class Viewport3D(QWidget):
             ry = sy + self.runner_y_offset
             def _build_runner():
                 faces = self._make_box_mesh(
-                    cx=sx, cy=ry, z_bottom=z_part - 4.0,
-                    width=160.0, depth=10.0, height=8.0,
+                    cx=sx, cy=ry, z_bottom=z_part - self.runner_height / 2.0,
+                    width=self.runner_length, depth=self.runner_width, height=self.runner_height,
                 )
                 colors = self._shade_faces(faces, self._hex_to_rgb(RUNNER_COLOR), alpha=0.85)
                 return faces, colors
@@ -1004,14 +1012,20 @@ class Viewport3D(QWidget):
             elif dtype in ("cold_shut", "cold shut", "cold_shut_risk"):
                 sphere = pv.Sphere(radius=marker_r, center=(x, y, z))
                 self.plotter.add_mesh(sphere, color="yellow", opacity=0.8)
+            elif dtype in ("misrun", "misrun_risk"):
+                sphere = pv.Sphere(radius=marker_r, center=(x, y, z))
+                self.plotter.add_mesh(sphere, color="orange", opacity=0.8)
             else:
                 desc = defect.lower() if isinstance(defect, str) else ""
-                if "shrinkage" in desc:
+                if "shrinkage" in desc or "porosity" in desc:
                     sphere = pv.Sphere(radius=marker_r, center=(x, y, z))
                     self.plotter.add_mesh(sphere, color="red", opacity=0.8)
                 elif "cold" in desc:
                     sphere = pv.Sphere(radius=marker_r, center=(x, y, z))
                     self.plotter.add_mesh(sphere, color="yellow", opacity=0.8)
+                elif "misrun" in desc:
+                    sphere = pv.Sphere(radius=marker_r, center=(x, y, z))
+                    self.plotter.add_mesh(sphere, color="orange", opacity=0.8)
 
 
 
@@ -1023,7 +1037,9 @@ class Viewport3D(QWidget):
             return
         marker_s = max(80, min(int(vsr * 160), 400))
         _, _, _, _, zmin, zmax = self._compute_bounds()
-        colors = {"shrinkage": "red", "cold_shut": "yellow"}
+        colors = {"shrinkage": "red", "shrinkage_risk": "red",
+                  "cold_shut": "yellow", "cold_shut_risk": "yellow",
+                  "misrun": "orange", "misrun_risk": "orange"}
         for i, defect in enumerate(defects):
             dtype = ""
             if isinstance(defect, tuple) and len(defect) >= 4:
@@ -1035,7 +1051,16 @@ class Viewport3D(QWidget):
                 y = rng.uniform(-10, 10)
                 z = zmax + 30 + i * 8
             desc = defect.lower() if isinstance(defect, str) else ""
-            color = colors.get(dtype, "red" if "shrinkage" in desc else "yellow" if "cold" in desc else "gray")
+            if dtype in colors:
+                color = colors[dtype]
+            elif "shrinkage" in desc or "porosity" in desc:
+                color = "red"
+            elif "cold" in desc:
+                color = "yellow"
+            elif "misrun" in desc:
+                color = "orange"
+            else:
+                color = "gray"
             self.ax.scatter(x, y, z, c=color, s=marker_s, marker="o", depthshade=True)
 
     def draw_defect_markers(self, defects: list, vsr: float = 1.0) -> None:
@@ -1261,18 +1286,21 @@ class Viewport3D(QWidget):
 
     def set_view(self, view_name: str):
         if self.use_pyvista:
-            pv_map = {
-                "Top": "xy", "Bottom": "xy",
-                "Front": "xz", "Back": "xz",
-                "Left": "yz", "Right": "yz",
-                "Iso": "isometric",
+            if view_name == "Iso":
+                self.plotter.view_isometric()
+                return
+            pv_views = {
+                "Top":    ("xy", False),
+                "Bottom": ("xy", True),
+                "Front":  ("xz", False),
+                "Back":   ("xz", True),
+                "Left":   ("yz", True),
+                "Right":  ("yz", False),
             }
-            vkey = pv_map.get(view_name)
-            if vkey:
-                if vkey == "isometric":
-                    self.plotter.view_isometric()
-                else:
-                    getattr(self.plotter, f"view_{vkey}")()
+            pair = pv_views.get(view_name)
+            if pair:
+                axis, negative = pair
+                getattr(self.plotter, f"view_{axis}")(negative=negative)
             return
         views = {
             "Top":    (90,  -90),
@@ -1300,13 +1328,15 @@ class Viewport3D(QWidget):
 
 
         return {
-            "has_sprue":    has_sprue,
-            "has_runner":   has_runner,
-            "has_gate":     has_gate,
-            "sprue_top_r":  self.sprue_top_radius if has_sprue else None,
-            "sprue_bot_r":  self.sprue_bottom_radius if has_sprue else None,
-            "runner_dia":   self.runner_diameter if has_runner else None,
-            "gate_area_mm2": self.gate_area if has_gate else None,
+            "has_sprue":       has_sprue,
+            "has_runner":      has_runner,
+            "has_gate":        has_gate,
+            "sprue_top_r":     self.sprue_top_radius if has_sprue else None,
+            "sprue_bot_r":     self.sprue_bottom_radius if has_sprue else None,
+            "runner_dia":      self.runner_diameter if has_runner else None,
+            "runner_width_mm": self.runner_width if has_runner else None,
+            "runner_height_mm": self.runner_height if has_runner else None,
+            "gate_area_mm2":   self.gate_area if has_gate else None,
         }
 
 
@@ -1491,8 +1521,7 @@ class Viewport3D(QWidget):
         self._anim_frac = t * t * (3.0 - 2.0 * t)
         self.render(self._anim_frac)
         if self._anim_step >= self._anim_steps:
-            self._anim_frac = 0.0
-            # Start solidification animation
+            self._anim_frac = 1.0  # keep the cavity filled during solidification
             self.start_solidify_animation(duration_s=3.0, on_done=self._anim_done_cb)
         else:
             # Single-shot: restart only after render completes; naturally skips
@@ -1519,7 +1548,7 @@ class Viewport3D(QWidget):
 
         self._solidify_step += 1
         self._solidify_frac  = self._solidify_step / self._solidify_steps
-        self.render(max(self._anim_frac, self._solidify_frac))
+        self.render(max(self._anim_frac, 1.0 if self._solidify_step else self._solidify_frac))
         if self._solidify_step >= self._solidify_steps:
             self._solidify_frac = 0.0
             if self._solidify_done_cb:
@@ -1531,20 +1560,25 @@ class Viewport3D(QWidget):
 
 
     def reset_anim(self) -> None:
-
-        """Stop animation and clear all loaded model state."""
-
+        """Stop animation timers and reset fractions; keep loaded models."""
         self._anim_timer.stop()
         self._solidify_timer.stop()
-        self._anim_frac      = 0.0
-        self._solidify_frac  = 0.0
-        self._anim_step      = 0
-        self._solidify_step  = 0
+        self._anim_frac = 0.0
+        self._solidify_frac = 0.0
+        self._anim_step = 0
+        self._solidify_step = 0
+        if self.models:
+            self.render(0.0)
+        else:
+            self._draw_idle_scene()
+
+    def clear_scene(self) -> None:
+        """Remove all loaded models and cached actors, then show the idle prompt."""
+        self.reset_anim()
         self.models.clear()
         self.transforms.clear()
         self.active_model = ""
 
-        # Clear cached rendering state
         self._gating_geo_cache.clear()
         self._gating_cache_key = ()
         self._mpl_model_collections.clear()

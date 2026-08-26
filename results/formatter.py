@@ -75,9 +75,12 @@ def build_results_text(r: dict) -> str:
     cr = r.get("cooling_rate", 0.0)
     cr_str = f"{cr:.0f} °F/min" if cr > 0 else "n/a"
 
-    # Superheat color
+    # Superheat color — use the metal's own minimum when present
     superheat = r.get("superheat", 0.0)
-    sh_color = _C["defect"] if superheat < 50 else (_C["warn"] if superheat < 100 else _C["ok"])
+    min_sh = r.get("min_superheat_f", 50)
+    sh_color = _C["defect"] if superheat < min_sh else (
+        _C["warn"] if superheat < min_sh * 2 else _C["ok"]
+    )
 
     rows = []
     rows.append(_section("INPUT"))

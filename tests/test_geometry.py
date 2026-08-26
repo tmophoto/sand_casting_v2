@@ -78,6 +78,13 @@ class TestGeometryStats:
         s = self._stats(unit_cube_mesh())
         assert "vol_cm3" in s
         assert "surf_cm2" in s
+        assert "z_min" in s
+        assert "z_max" in s
+
+    def test_unit_cube_z_extents(self):
+        s = self._stats(unit_cube_mesh())
+        assert abs(s["z_min"] - 0.0) < 1e-9
+        assert abs(s["z_max"] - 1.0) < 1e-9
 
     def test_unit_cube_volume(self):
         """Unit cube volume = 1 mm³ = 0.001 cm³."""

@@ -11,7 +11,7 @@ from ui.demo_part import build_demo_mesh, DEMO_PART_NAME
 from viewport.viewport import Viewport3D
 from simulation.worker import SimWorker
 from results.formatter import build_results_text
-from constants import METAL_DEFAULTS, FLASK_SIZES
+from constants import METAL_DEFAULTS, FLASK_SIZES, shrink_scale_from_slider
 
 
 class MainWindow(QMainWindow):
@@ -95,8 +95,8 @@ class MainWindow(QMainWindow):
             "Where the mold splits into cope (top) and drag (bottom),\n"
             "expressed as % of part height."
         )
-        label = QLabel("Position: 50%")
-        parting_layout.addWidget(label)
+        self.parting_label = QLabel("Position: 50%")
+        parting_layout.addWidget(self.parting_label)
         parting_layout.addWidget(self.parting_slider)
         # Add container widget (not layout) to panel
         parting_panel.content_layout.addWidget(parting_container)
@@ -148,8 +148,9 @@ class MainWindow(QMainWindow):
         for metal in METAL_DEFAULTS:
             self.metal_combo.addItem(metal)
         self.pour_spin = QSlider(Qt.Orientation.Horizontal)
-        self.pour_spin.setMinimum(1000)
-        self.pour_spin.setMaximum(2500)
+        # Covers A356 (1300 °F) through 316 stainless (2900 °F)
+        self.pour_spin.setMinimum(800)
+        self.pour_spin.setMaximum(3200)
         self.pour_spin.setValue(METAL_DEFAULTS["A356 Aluminum"]["pour_temp_f"])
         self.mold_spin = QSlider(Qt.Orientation.Horizontal)
         self.mold_spin.setMinimum(32)
@@ -198,13 +199,17 @@ class MainWindow(QMainWindow):
         self.rot_slider.setMinimum(0)
         self.rot_slider.setMaximum(360)
         self.rot_slider.setValue(0)
-        placement_layout.addWidget(QLabel("X Offset: 0 mm"))
+        self.x_label = QLabel("X Offset: 0 mm")
+        self.y_label = QLabel("Y Offset: 0 mm")
+        self.z_label = QLabel("Z Offset: 0 mm")
+        self.rot_label = QLabel("Rotation: 0 deg")
+        placement_layout.addWidget(self.x_label)
         placement_layout.addWidget(self.x_slider)
-        placement_layout.addWidget(QLabel("Y Offset: 0 mm"))
+        placement_layout.addWidget(self.y_label)
         placement_layout.addWidget(self.y_slider)
-        placement_layout.addWidget(QLabel("Z Offset: 0 mm"))
+        placement_layout.addWidget(self.z_label)
         placement_layout.addWidget(self.z_slider)
-        placement_layout.addWidget(QLabel("Rotation: 0 deg"))
+        placement_layout.addWidget(self.rot_label)
         placement_layout.addWidget(self.rot_slider)
         # Add container widget (not layout) to panel
         placement_panel.content_layout.addWidget(placement_container)
@@ -237,13 +242,17 @@ class MainWindow(QMainWindow):
         self.riser_y_slider.setMaximum(200)
         self.riser_y_slider.setValue(0)
         self.riser_y_slider.setToolTip("Riser Y position relative to part centre (mm)")
-        gating_placement_layout.addWidget(QLabel("Sprue X: 0 mm"))
+        self.sprue_x_label = QLabel("Sprue X: 0 mm")
+        self.sprue_y_label = QLabel("Sprue Y: 0 mm")
+        self.riser_x_label = QLabel("Riser X: 0 mm")
+        self.riser_y_label = QLabel("Riser Y: 0 mm")
+        gating_placement_layout.addWidget(self.sprue_x_label)
         gating_placement_layout.addWidget(self.sprue_x_slider)
-        gating_placement_layout.addWidget(QLabel("Sprue Y: 0 mm"))
+        gating_placement_layout.addWidget(self.sprue_y_label)
         gating_placement_layout.addWidget(self.sprue_y_slider)
-        gating_placement_layout.addWidget(QLabel("Riser X: 0 mm"))
+        gating_placement_layout.addWidget(self.riser_x_label)
         gating_placement_layout.addWidget(self.riser_x_slider)
-        gating_placement_layout.addWidget(QLabel("Riser Y: 0 mm"))
+        gating_placement_layout.addWidget(self.riser_y_label)
         gating_placement_layout.addWidget(self.riser_y_slider)
         # Add container widget (not layout) to panel
         gating_placement_panel.content_layout.addWidget(gating_placement_container)
@@ -265,7 +274,7 @@ class MainWindow(QMainWindow):
             "The slider adds 0–10 % to part dimensions."
         )
         shrink_pct = METAL_DEFAULTS["A356 Aluminum"]["shrinkage_pct"]
-        scale_val = 1.0 + (106 - 100) / 1000.0
+        scale_val = shrink_scale_from_slider(self.shrink_slider.value())
         self.shrink_label = QLabel(f"Shrinkage: {shrink_pct}%  ·  scale ×{scale_val:.3f}")
         shrink_layout.addWidget(self.shrink_label)
         shrink_layout.addWidget(self.shrink_slider)
@@ -384,6 +393,10 @@ class MainWindow(QMainWindow):
             dy = self.y_slider.value()
             dz = self.z_slider.value()
             rot = self.rot_slider.value()
+            self.x_label.setText(f"X Offset: {dx} mm")
+            self.y_label.setText(f"Y Offset: {dy} mm")
+            self.z_label.setText(f"Z Offset: {dz} mm")
+            self.rot_label.setText(f"Rotation: {rot} deg")
             self.viewport.set_transformation(dx, dy, dz, rot)
 
 
@@ -401,6 +414,10 @@ class MainWindow(QMainWindow):
             riser_x = self.riser_x_slider.value()
             riser_y = self.riser_y_slider.value()
             runner_y = 0
+            self.sprue_x_label.setText(f"Sprue X: {sprue_x} mm")
+            self.sprue_y_label.setText(f"Sprue Y: {sprue_y} mm")
+            self.riser_x_label.setText(f"Riser X: {riser_x} mm")
+            self.riser_y_label.setText(f"Riser Y: {riser_y} mm")
             self.viewport.set_gating_offset(sprue_x, sprue_y, runner_y, riser_x, riser_y)
 
 
@@ -421,7 +438,7 @@ class MainWindow(QMainWindow):
         # Shrinkage slider
         def update_shrink_label(val):
             pct = METAL_DEFAULTS[self.metal_combo.currentText()]["shrinkage_pct"]
-            scale = 1.0 + (val - 100) / 1000.0
+            scale = shrink_scale_from_slider(val)
             self.shrink_label.setText(f"Shrinkage: {pct}%  ·  scale ×{scale:.3f}")
 
         self.shrink_slider.valueChanged.connect(update_shrink_label)
@@ -449,6 +466,10 @@ class MainWindow(QMainWindow):
         self.sprue_y_slider.setValue(int(data.get("sprue_y", 0)))
         self.riser_x_slider.setValue(int(data.get("riser_x", 0)))
         self.riser_y_slider.setValue(int(data.get("riser_y", 0)))
+        self.sprue_x_label.setText(f"Sprue X: {self.sprue_x_slider.value()} mm")
+        self.sprue_y_label.setText(f"Sprue Y: {self.sprue_y_slider.value()} mm")
+        self.riser_x_label.setText(f"Riser X: {self.riser_x_slider.value()} mm")
+        self.riser_y_label.setText(f"Riser Y: {self.riser_y_slider.value()} mm")
         self.sprue_x_slider.blockSignals(False)
         self.sprue_y_slider.blockSignals(False)
         self.riser_x_slider.blockSignals(False)
@@ -462,15 +483,20 @@ class MainWindow(QMainWindow):
         if filename:
             try:
                 stats = self.viewport.load_stl(filename)
-                self.stl_label.setText(f"Loaded: {filename}\nVolume: {round(stats['vol_cm3'], 2)} cm^3\nSurface: {round(stats['surf_cm2'], 2)} cm^2")
+                self.stl_label.setText(
+                    f"Loaded: {filename}\n"
+                    f"Volume: {stats['vol_cm3']:.2f} cm\u00b3\n"
+                    f"Surface: {stats['surf_cm2']:.2f} cm\u00b2"
+                )
                 self._geometry_stats = stats
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load STL:\n{str(e)}")
 
     def _on_load_demo(self) -> None:
         """Load the built-in Motor Mount Bracket demo with pre-configured settings."""
-        # 1. Reset to clean state (clears animations, sliders, gating)
+        # 1. Reset controls, then clear any previously loaded parts
         self._on_reset()
+        self.viewport.clear_scene()
 
         # 2. Build the procedural mesh
         triangles, normals, stats = build_demo_mesh()
@@ -531,22 +557,19 @@ class MainWindow(QMainWindow):
         """Handle parting line slider change."""
         frac = val / 100.0
         self.viewport.set_parting(frac)
-        parent_widget = self.parting_slider.parent()
-        if parent_widget:
-            for i in range(parent_widget.layout().count()):
-                widget = parent_widget.layout().itemAt(i).widget()
-                if isinstance(widget, QLabel) and "Position:" in widget.text():
-                    widget.setText("Position: " + str(val) + "%")
-                    break
+        self.parting_label.setText(f"Position: {val}%")
 
     def _on_metal_changed(self, index: int) -> None:
         """Handle metal combo box change."""
         metal_name = self.metal_combo.currentText()
-        pour_temp  = METAL_DEFAULTS[metal_name]["pour_temp_f"]
-        shrink_pct = METAL_DEFAULTS[metal_name]["shrinkage_pct"]
+        metal = METAL_DEFAULTS[metal_name]
+        pour_temp = metal["pour_temp_f"]
+        shrink_pct = metal["shrinkage_pct"]
         self.pour_spin.setValue(pour_temp)
         self.pour_temp_label.setText(f"Pour Temp: {pour_temp} °F")
-        scale_val = 1.0 + (self.shrink_slider.value() - 100) / 1000.0
+        shrink_slider = min(self.shrink_slider.maximum(), 100 + int(round(shrink_pct)))
+        self.shrink_slider.setValue(shrink_slider)
+        scale_val = shrink_scale_from_slider(self.shrink_slider.value())
         self.shrink_label.setText(f"Shrinkage: {shrink_pct}%  ·  scale ×{scale_val:.3f}")
         self.viewport.set_active_metal(metal_name)
 
@@ -569,6 +592,7 @@ class MainWindow(QMainWindow):
                 height = float(parts[2])
                 self._flask_presets[name] = (width, height)
                 self.flask_combo.addItem(name)
+                self.flask_combo.setCurrentText(name)
             except Exception as e:
                 QMessageBox.warning(self, "Error", "Invalid format: " + str(e))
 
@@ -589,7 +613,7 @@ class MainWindow(QMainWindow):
             'has_riser': 'Riser (Open)' in self.viewport.gating,
             'gating_params': self.viewport.get_gating_params(),
             'runner_y_offset': self.viewport.runner_y_offset,
-            'shrink_scale': 1.0 + (self.shrink_slider.value() - 100) / 1000.0,
+            'shrink_scale': shrink_scale_from_slider(self.shrink_slider.value()),
             'z_max': self._geometry_stats.get('z_max', 100.0),
         }
         # Run simulation in a thread
@@ -622,16 +646,23 @@ class MainWindow(QMainWindow):
             self.results_text.setHtml(build_results_text(result))
             # Decorate defects for drawing
             defects = result.get("defects", [])
+            warnings = result.get("warnings", [])
             decorated_defects = []
+            z_marker = result.get("z_max", self._geometry_stats.get("z_max", 100))
             for d in defects:
                 if isinstance(d, tuple):
                     decorated_defects.append(d)
-                elif "shrinkage" in d.lower():
-                    decorated_defects.append(("shrinkage_risk", 0, 0, result.get("z_max", 100)))
+                elif "shrinkage" in d.lower() or "porosity" in d.lower():
+                    decorated_defects.append(("shrinkage_risk", 0, 0, z_marker))
                 elif "cold" in d.lower():
-                    decorated_defects.append(("cold_shut_risk", 0, 0, result.get("z_max", 100)))
+                    decorated_defects.append(("cold_shut_risk", 0, 0, z_marker))
+                elif "misrun" in d.lower():
+                    decorated_defects.append(("misrun_risk", 0, 0, z_marker))
                 else:
                     decorated_defects.append(d)
+            for w in warnings:
+                if "porosity" in w.lower() or "shrinkage" in w.lower():
+                    decorated_defects.append(("shrinkage_risk", 0, 0, z_marker))
             # Start animations with draw_defect_markers as final callback
             duration = max(2.0, result.get("fill_time_s", 3.0))
             vsr = result.get("vsr", 1.0)
@@ -646,12 +677,14 @@ class MainWindow(QMainWindow):
             )
 
     def _on_reset(self) -> None:
-        """Reset the application state."""
+        """Reset controls and animations without unloading the current part."""
         self.viewport.reset_anim()
-        # Reset sliders to defaults
         metal_name = self.metal_combo.currentText()
-        self.pour_spin.setValue(METAL_DEFAULTS[metal_name]["pour_temp_f"])
+        metal = METAL_DEFAULTS[metal_name]
+        self.pour_spin.setValue(metal["pour_temp_f"])
         self.mold_spin.setValue(100)
+        self.thin_combo.setCurrentIndex(0)
+        self.parting_slider.setValue(50)
         self.x_slider.setValue(0)
         self.y_slider.setValue(0)
         self.z_slider.setValue(0)
@@ -660,10 +693,30 @@ class MainWindow(QMainWindow):
         self.sprue_y_slider.setValue(0)
         self.riser_x_slider.setValue(0)
         self.riser_y_slider.setValue(0)
-        # Reset checkboxes
+        shrink_slider = min(self.shrink_slider.maximum(), 100 + int(round(metal["shrinkage_pct"])))
+        self.shrink_slider.setValue(shrink_slider)
         for cb in self.gating_checkboxes.values():
             cb.setChecked(False)
-        # Clear results
         self.results_text.setText("")
-        self.stl_label.setText("No file loaded")
         self._last_result = None
+
+    def closeEvent(self, event) -> None:
+        """Stop a running simulation thread before the window closes."""
+        if self._sim_thread is not None:
+            try:
+                if self._sim_thread.isRunning():
+                    self._sim_thread.quit()
+                    self._sim_thread.wait(2000)
+            except RuntimeError:
+                pass
+        self.viewport.reset_anim()
+        event.accept()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if not getattr(self.viewport, "use_pyvista", False):
+            try:
+                self.viewport.fig.tight_layout()
+                self.viewport.fig.canvas.draw_idle()
+            except Exception:
+                pass

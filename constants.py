@@ -113,3 +113,8 @@ METAL_PBR = {
         "roughness": 0.15,
     },
 }
+
+
+def shrink_scale_from_slider(slider_value: int) -> float:
+    """Map the 100–110 shrinkage slider onto a linear scale factor (1.00–1.10)."""
+    return slider_value / 100.0

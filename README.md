@@ -96,6 +96,9 @@ cd sand_casting_v2
 # Install mandatory dependencies
 pip install -r requirements.txt
 
+# Optional: tests
+pip install -r requirements-dev.txt
+
 # Optional: GPU-accelerated renderer
 pip install pyvista pyvistaqt
 
@@ -201,8 +204,8 @@ The **Metal & Temperature** panel provides:
 
 - **Metal** drop-down — A356 Aluminum or Everdur Bronze; pour temperature and
   shrinkage defaults update automatically.
-- **Pour Temp** slider (1,000–2,500 °F) — override the metal's default pour
-  temperature.
+- **Pour Temp** slider (800–3,200 °F) — override the metal's default pour
+  temperature. The range covers aluminium through stainless steel.
 - **Mold Temp** slider (32–300 °F) — mould pre-heat temperature; values above
   120 °F trigger a burn-on warning.
 - **Thin Wall?** — flag that tightens the cold-shut superheat threshold.
@@ -294,13 +297,12 @@ t_fill = V / Q
 | `h` | Effective sprue head = 100 mm |
 | `A_effective` | Area of the most restrictive element (mm²) |
 
-**Restriction priority** (smallest area wins):
+**Restriction priority** — among every enabled component, the smallest area wins:
 
-1. Sprue + gate present → compare sprue exit vs gate area
-2. Sprue + runner present → compare sprue exit vs runner area
-3. Sprue only → use sprue exit area
-4. Gate only → use gate area
-5. No gating → fallback: `max(3.0 s, volume_cm³ / 80.0)`
+1. Tapered sprue → exit (bottom) area
+2. Horizontal runner → rectangular width × height (10 × 8 mm)
+3. Fan gate → hydraulic area (default 40 mm²)
+4. No gating → fallback: `max(3.0 s, volume_cm³ / 80.0)`
 
 Fill time is clamped to a minimum of 1.5 s.
 
@@ -323,6 +325,9 @@ Fill time is clamped to a minimum of 1.5 s.
 |---|---|---|---|---|---|
 | A356 Aluminum | 1,300 | 1,075 | 2.67 g/cm³ | 6 % | 1.0 |
 | Everdur Bronze (C52100) | 1,950 | 1,780 | 8.8 g/cm³ | 2 % | 1.4 |
+| Gray Iron (ASTM A48) | 2,600 | 2,200 | 7.15 g/cm³ | 1 % | 1.6 |
+| Ductile Iron (65-45-12) | 2,650 | 2,250 | 7.1 g/cm³ | 0.8 % | 1.6 |
+| 316 Stainless Steel | 2,900 | 2,550 | 7.99 g/cm³ | 2.5 % | 1.8 |
 
 See [Adding a New Metal](#adding-a-new-metal) to extend this list.
 
@@ -443,16 +448,17 @@ iterates over `METAL_DEFAULTS` to populate the combo box.
 ## Running Tests
 
 ```bash
+pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-All tests are headless (no display required).
+All tests are headless (`QT_QPA_PLATFORM=offscreen`; no display required).
 
 | Test file | Coverage |
 |---|---|
-| `tests/test_simulation.py` | SimWorker physics — 30 tests |
-| `tests/test_formatter.py` | `build_results_text()` output format — 27 tests |
-| `tests/test_geometry.py` | Geometry helpers and mesh generators — 37 tests |
+| `tests/test_simulation.py` | SimWorker physics |
+| `tests/test_formatter.py` | `build_results_text()` output format |
+| `tests/test_geometry.py` | Geometry helpers and mesh generators |
 
 ---
 
