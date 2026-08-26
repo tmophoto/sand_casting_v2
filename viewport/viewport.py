@@ -21,7 +21,8 @@ except ImportError:
 from constants import (COPE_COLOR, DRAG_COLOR, SPRUE_COLOR, RUNNER_COLOR,
                        GATE_COLOR, RISER_COLOR, MODEL_COLORS, METAL_PBR,
                        DEFAULT_FLASK_HEIGHT_IN, SHELL_COLOR, DEFAULT_SHELL_MM,
-                       CHILL_COLOR)
+                       CHILL_COLOR, FILTER_COLOR, BASIN_COLOR, GATE2_COLOR,
+                       PRINTED_SAND_COLOR, DEFAULT_PRINTED_MM, FEEDING_STOP_FRAC)
 from simulation.mesh_tools import (
     inspect_mesh, invert_winding, qem_decimate, local_thickness,
     find_defect_sites, THIN_WALL_MM, load_mesh_vectors,
@@ -83,6 +84,7 @@ class Viewport3D(QWidget):
         self.flask_height_in  = float(DEFAULT_FLASK_HEIGHT_IN)
         self.mold_kind        = "sand"
         self.shell_mm         = float(DEFAULT_SHELL_MM)
+        self.printed_mm       = float(DEFAULT_PRINTED_MM)
 
 
         self.sprue_offset  = np.array([0.0, 60.0])
@@ -101,12 +103,19 @@ class Viewport3D(QWidget):
         self.gate_area           = 40.0
         self.riser_radius        = 20.0
         self.riser_height        = 60.0
+        self.riser_blind         = False
+        self.neck_radius         = 8.0
+        self.neck_height         = 12.0
+        self.gate2_offset        = np.array([0.0, -60.0])
+        self.filter_area         = 400.0
+        self.basin_radius        = 18.0
+        self.basin_height        = 22.0
         self.chills: list        = []
         self.shrink_scale        = 1.0
         self.show_as_cast        = False
         self.selected_gating     = ""
-        self.pick_mode           = ""          # "", "parting", "sprue", "gate", "riser", "chill"
-        self.overlay_mode        = ""          # "", "draft", "undercut", "hotspot", "freeze", "fill", "porosity", "niyama"
+        self.pick_mode           = ""          # "", "parting", "sprue", "gate", "riser", "chill", "filter", "gate2"
+        self.overlay_mode        = ""          # + "xray"
         self.restrictive_elem    = ""
         self.clip_enabled        = False
         self.clip_axis           = 0           # 0=X 1=Y 2=Z
@@ -114,6 +123,7 @@ class Viewport3D(QWidget):
         self._sim_fields: dict   = {}
         self._clock_fill_s       = 0.0
         self._clock_solidify_min = 0.0
+        self._solid_frac_label   = False
 
 
         self.pour_rate: float  = 1.0
@@ -253,6 +263,8 @@ class Viewport3D(QWidget):
             z_part = 50.0
             if self.mold_kind == "shell":
                 self._draw_shell_outline_pv(z_part)
+            elif self.mold_kind == "printed":
+                self._draw_printed_outline_pv(z_part)
             else:
                 fw_mm = self.flask_size[0] * 25.4
                 fh_mm = self.flask_size[1] * 25.4
@@ -273,6 +285,13 @@ class Viewport3D(QWidget):
             if self.mold_kind == "shell":
                 self._draw_shell_outline_mpl(z_part := 40.0)
                 xmin, xmax, ymin, ymax, zmin, zmax = self._shell_aabb()
+                self.ax.text(0, 0, (zmin + zmax) * 0.55, hint,
+                             ha="center", va="center", color="#A6ADC8", fontsize=11)
+                self.ax.set_xlim(xmin - 20, xmax + 20)
+                self.ax.set_ylim(ymin - 20, ymax + 20)
+            elif self.mold_kind == "printed":
+                self._draw_printed_outline_mpl(z_part := 40.0)
+                xmin, xmax, ymin, ymax, zmin, zmax = self._printed_aabb()
                 self.ax.text(0, 0, (zmin + zmax) * 0.55, hint,
                              ha="center", va="center", color="#A6ADC8", fontsize=11)
                 self.ax.set_xlim(xmin - 20, xmax + 20)
@@ -548,8 +567,10 @@ class Viewport3D(QWidget):
                 if len(drag_verts):
                     drag_verts = drag_verts[self._clip_mask(drag_verts)]
 
-            cope_colors = [cope_base + (1.0,)] * len(cope_verts)
-            drag_colors = [drag_base + (1.0,)] * len(drag_verts)
+            cope_alpha = 0.12 if self.overlay_mode == "xray" else 1.0
+            drag_alpha = 0.12 if self.overlay_mode == "xray" else 1.0
+            cope_colors = [cope_base + (cope_alpha,)] * len(cope_verts)
+            drag_colors = [drag_base + (drag_alpha,)] * len(drag_verts)
 
             if name not in self._mpl_model_collections:
                 # First render of this model: create collections
@@ -592,6 +613,8 @@ class Viewport3D(QWidget):
         self._draw_flask_outline(z_part)
         if self.clip_enabled:
             self._draw_clip_plane_mpl()
+        if self.overlay_mode == "xray":
+            self._draw_xray_points_mpl()
 
         if self.models:
             self._draw_gating(z_part)
@@ -602,7 +625,7 @@ class Viewport3D(QWidget):
 
         half_w = fw_mm / 2 + PAD
         half_h = fh_mm / 2 + PAD
-        if self.mold_kind == "shell":
+        if self.mold_kind in ("shell", "printed"):
             sx0, sx1, sy0, sy1, _, _ = self._shell_aabb()
             half_w = max(abs(sx0), abs(sx1)) + PAD * 0.5
             half_h = max(abs(sy0), abs(sy1)) + PAD * 0.5
@@ -660,6 +683,10 @@ class Viewport3D(QWidget):
                 self._pv_actors[name]["model"].user_matrix = (
                     self._build_user_matrix(self.transforms[name])
                 )
+                try:
+                    self._pv_actors[name]["model"].SetVisibility(self.overlay_mode != "xray")
+                except Exception:
+                    pass
 
         # ----------------------------------------------------------------
         # 3. Fill animation overlay — remove old, add new
@@ -704,7 +731,7 @@ class Viewport3D(QWidget):
         flask_key = (
             round(zmin, 1), round(zmax, 1), self.flask_size,
             round(self.flask_height_in, 2), round(z_part, 1),
-            self.mold_kind, round(self.shell_mm, 1),
+            self.mold_kind, round(self.shell_mm, 1), round(self.printed_mm, 1),
         )
         if flask_key != self._pv_flask_key:
             for a in self._pv_flask_actors:
@@ -713,6 +740,8 @@ class Viewport3D(QWidget):
             self._pv_flask_key = flask_key
             if self.mold_kind == "shell":
                 self._draw_shell_outline_pv(z_part)
+            elif self.mold_kind == "printed":
+                self._draw_printed_outline_pv(z_part)
             else:
                 fw_mm = self.flask_size[0] * 25.4
                 fh_mm = self.flask_size[1] * 25.4
@@ -733,19 +762,7 @@ class Viewport3D(QWidget):
         # ----------------------------------------------------------------
         # 5. Gating actors — cached by config key, rebuild on change
         # ----------------------------------------------------------------
-        gating_key = (
-            tuple(sorted(self.gating)),
-            round(z_part, 2), round(float(zmax), 2),
-            tuple(float(v) for v in self.sprue_offset),
-            round(self.runner_y_offset, 2),
-            tuple(float(v) for v in self.riser_offset),
-            self.sprue_top_radius,
-            self.sprue_bottom_radius,
-            self.sprue_height, self.runner_width, self.runner_height,
-            self.runner_length, self.gate_area, self.selected_gating, self.restrictive_elem,
-            round(self.riser_radius, 2), round(self.riser_height, 2),
-            len(self.chills),
-        )
+        gating_key = self._gating_state_key(z_part, zmax)
         if gating_key != self._pv_gating_key:
             for a in self._pv_gating_actors:
                 self.plotter.remove_actor(a)
@@ -764,6 +781,8 @@ class Viewport3D(QWidget):
         self._draw_choke_marker_pv(z_part, zmax)
         self._draw_clock_pv()
         self._draw_clip_plane_pv()
+        if self.overlay_mode == "xray":
+            self._draw_xray_points_pv()
 
         self.plotter.render()
 
@@ -772,6 +791,9 @@ class Viewport3D(QWidget):
     def _draw_flask_outline(self, z_part: float):
         if self.mold_kind == "shell":
             self._draw_shell_outline_mpl(z_part)
+            return
+        if self.mold_kind == "printed":
+            self._draw_printed_outline_mpl(z_part)
             return
         fw_mm = self.flask_size[0] * 25.4
         fh_mm = self.flask_size[1] * 25.4
@@ -818,6 +840,31 @@ class Viewport3D(QWidget):
             color="#89B4FA", linewidth=1.6, alpha=0.7,
         )
 
+    def _draw_printed_outline_mpl(self, z_part: float):
+        xmin, xmax, ymin, ymax, zmin, zmax = self._printed_aabb()
+        from mpl_toolkits.mplot3d.art3d import Poly3DCollection as P3
+        rgb = self._hex_to_rgb(PRINTED_SAND_COLOR)
+        faces = self._box_faces(xmin, xmax, ymin, ymax, zmin, zmax)
+        self.ax.add_collection3d(
+            P3(faces, facecolors=[rgb + (0.10,)] * 6, edgecolors=PRINTED_SAND_COLOR,
+               linewidths=0.8, alpha=0.10)
+        )
+        corners, edges = self._box_edges(xmin, xmax, ymin, ymax, zmin, zmax)
+        for a, b in edges:
+            p0, p1 = corners[a], corners[b]
+            self.ax.plot([p0[0], p1[0]], [p0[1], p1[1]], [p0[2], p1[2]],
+                         color=PRINTED_SAND_COLOR, linewidth=1.1, alpha=0.9)
+
+    def _draw_printed_outline_pv(self, z_part: float):
+        xmin, xmax, ymin, ymax, zmin, zmax = self._printed_aabb()
+        box = pv.Box(bounds=(xmin, xmax, ymin, ymax, zmin, zmax))
+        self._pv_flask_actors.append(
+            self.plotter.add_mesh(
+                box, color=PRINTED_SAND_COLOR, opacity=0.10, show_edges=True,
+                edge_color=PRINTED_SAND_COLOR, line_width=1,
+            )
+        )
+
 
 
     def _draw_flask_outline_pv(self, z_part: float):
@@ -825,6 +872,9 @@ class Viewport3D(QWidget):
         """Draw flask outline using PyVista."""
         if self.mold_kind == "shell":
             self._draw_shell_outline_pv(z_part)
+            return
+        if self.mold_kind == "printed":
+            self._draw_printed_outline_pv(z_part)
             return
 
         fw_mm = self.flask_size[0] * 25.4
@@ -984,6 +1034,50 @@ class Viewport3D(QWidget):
             )
             self._add_pv_gating_mesh(faces, *_gating_colors["Fan Gate"])
 
+        if "Second Gate" in self.gating:
+            gx, gy = self.gate2_offset
+            gw, gd, gh = self._gate_box()
+            faces = self._make_box_mesh(
+                cx=gx, cy=gy, z_bottom=z_part - gh / 2.0,
+                width=gw, depth=gd, height=gh,
+            )
+            self._add_pv_gating_mesh(faces, GATE2_COLOR, 0.85)
+
+        if "Foam Filter" in self.gating:
+            sx, sy = self.sprue_offset
+            side = max(12.0, math.sqrt(max(self.filter_area, 100.0)))
+            faces = self._make_box_mesh(
+                cx=sx, cy=sy + 18.0, z_bottom=z_part - 6.0,
+                width=side, depth=8.0, height=12.0,
+            )
+            self._add_pv_gating_mesh(faces, FILTER_COLOR, 0.9)
+
+        if "Pour Basin" in self.gating and "Tapered Sprue" in self.gating:
+            sx, sy = self.sprue_offset
+            z_bot, sprue_h = self._sprue_z_and_height(z_part, zmax)
+            faces = self._make_cylinder_mesh(
+                cx=sx, cy=sy, z_bottom=z_bot + sprue_h,
+                r_bottom=self.basin_radius, r_top=self.basin_radius * 1.15,
+                height=self.basin_height, sides=20,
+            )
+            self._add_pv_gating_mesh(faces, BASIN_COLOR, 0.75)
+
+        if "Riser (Open)" in self.gating and self.neck_height > 0:
+            rx, ry = self.riser_offset
+            faces = self._make_cylinder_mesh(
+                cx=rx, cy=ry, z_bottom=z_part - self.neck_height,
+                r_bottom=self.neck_radius, r_top=self.neck_radius,
+                height=self.neck_height, sides=16,
+            )
+            self._add_pv_gating_mesh(faces, RISER_COLOR, 0.9)
+            if self.riser_blind:
+                cap = self._make_cylinder_mesh(
+                    cx=rx, cy=ry, z_bottom=z_part + self.riser_height - 3.0,
+                    r_bottom=self.riser_radius + 1.0, r_top=self.riser_radius + 1.0,
+                    height=4.0, sides=16,
+                )
+                self._add_pv_gating_mesh(cap, RISER_COLOR, 0.95)
+
         self._add_pv_chills(z_part)
 
     def _add_pv_gating_mesh(self, faces: np.ndarray, color: str,
@@ -1012,24 +1106,7 @@ class Viewport3D(QWidget):
         _, _, _, _, _, zmax = self._compute_bounds()
 
         # Build a lightweight key from every param that affects gating geometry.
-        cache_key = (
-            tuple(sorted(self.gating)),
-            round(z_part, 2),
-            round(float(zmax), 2),
-            tuple(float(v) for v in self.sprue_offset),
-            round(self.runner_y_offset, 2),
-            tuple(float(v) for v in self.riser_offset),
-            self.sprue_top_radius,
-            self.sprue_bottom_radius,
-            self.sprue_height,
-            self.runner_width,
-            self.runner_height,
-            self.runner_length,
-            self.selected_gating,
-            round(self.riser_radius, 2),
-            round(self.riser_height, 2),
-            round(self.gate_area, 1),
-        )
+        cache_key = self._gating_state_key(z_part, zmax)
         if cache_key != self._gating_cache_key:
             self._gating_geo_cache.clear()
             self._gating_cache_key = cache_key
@@ -1104,6 +1181,67 @@ class Viewport3D(QWidget):
             faces, colors = _get("gate", _build_gate)
             self.ax.add_collection3d(Poly3DCollection(
                 faces, facecolors=colors[:, :3], edgecolor="none", shade=True
+            ))
+
+        if "Second Gate" in self.gating:
+            gx, gy = self.gate2_offset
+            gw, gd, gh = self._gate_box()
+            faces = self._make_box_mesh(
+                cx=gx, cy=gy, z_bottom=z_part - gh / 2.0,
+                width=gw, depth=gd, height=gh,
+            )
+            colors = self._shade_faces(faces, self._hex_to_rgb(GATE2_COLOR), alpha=0.85)
+            self.ax.add_collection3d(Poly3DCollection(
+                faces, facecolors=colors[:, :3], edgecolor="none", shade=True
+            ))
+
+        if "Foam Filter" in self.gating:
+            sx, sy = self.sprue_offset
+            side = max(12.0, math.sqrt(max(self.filter_area, 100.0)))
+            faces = self._make_box_mesh(
+                cx=sx, cy=sy + 18.0, z_bottom=z_part - 6.0,
+                width=side, depth=8.0, height=12.0,
+            )
+            colors = self._shade_faces(faces, self._hex_to_rgb(FILTER_COLOR), alpha=0.9)
+            self.ax.add_collection3d(Poly3DCollection(
+                faces, facecolors=colors[:, :3], edgecolor="none", shade=True
+            ))
+
+        if "Pour Basin" in self.gating and "Tapered Sprue" in self.gating:
+            sx, sy = self.sprue_offset
+            _, _, _, _, _, zmax = self._compute_bounds()
+            z_bot, sprue_h = self._sprue_z_and_height(z_part, zmax)
+            faces = self._make_cylinder_mesh(
+                cx=sx, cy=sy, z_bottom=z_bot + sprue_h,
+                r_bottom=self.basin_radius, r_top=self.basin_radius * 1.15,
+                height=self.basin_height, sides=20,
+            )
+            colors = self._shade_faces(faces, self._hex_to_rgb(BASIN_COLOR), alpha=0.75)
+            self.ax.add_collection3d(Poly3DCollection(
+                faces, facecolors=colors[:, :3], edgecolor="none", shade=True
+            ))
+
+        if "Riser (Open)" in self.gating and self.neck_height > 0:
+            rx, ry = self.riser_offset
+            faces = self._make_cylinder_mesh(
+                cx=rx, cy=ry, z_bottom=z_part - self.neck_height,
+                r_bottom=self.neck_radius, r_top=self.neck_radius,
+                height=self.neck_height, sides=16,
+            )
+            colors = self._shade_faces(faces, self._hex_to_rgb(RISER_COLOR), alpha=0.9)
+            self.ax.add_collection3d(Poly3DCollection(
+                faces, facecolors=colors[:, :3], edgecolor="none", shade=True
+            ))
+        if "Riser (Open)" in self.gating and self.riser_blind:
+            rx, ry = self.riser_offset
+            cap = self._make_cylinder_mesh(
+                cx=rx, cy=ry, z_bottom=z_part + self.riser_height - 3.0,
+                r_bottom=self.riser_radius + 1.0, r_top=self.riser_radius + 1.0,
+                height=4.0, sides=16,
+            )
+            colors = self._shade_faces(cap, self._hex_to_rgb(RISER_COLOR), alpha=0.95)
+            self.ax.add_collection3d(Poly3DCollection(
+                cap, facecolors=colors[:, :3], edgecolor="none", shade=True
             ))
 
         self._draw_chills_mpl(z_part)
@@ -1449,8 +1587,11 @@ class Viewport3D(QWidget):
         xmin, xmax, ymin, ymax, zmin, zmax = self._compute_bounds()
         if not self.models:
             xmin, xmax, ymin, ymax, zmin, zmax = -40.0, 40.0, -40.0, 40.0, 0.0, 80.0
-        t = float(self.shell_mm)
+        t = float(self.printed_mm if self.mold_kind == "printed" else self.shell_mm)
         return xmin - t, xmax + t, ymin - t, ymax + t, zmin - t, zmax + t
+
+    def _printed_aabb(self):
+        return self._shell_aabb()
 
     def _box_edges(self, xmin, xmax, ymin, ymax, zmin, zmax):
         corners = [
@@ -1627,6 +1768,9 @@ class Viewport3D(QWidget):
         if mode == "hotspot":
             thick = self._face_thickness(name, verts)
             return self._scalar_rgba(thick, "hot")
+        if mode == "xray":
+            rgba = np.tile(np.array(self._metal_rgb() + (0.14,)), (len(verts), 1))
+            return rgba
         key = {"freeze": "freeze", "fill": "fill", "porosity": "porosity",
                "niyama": "niyama"}.get(mode)
         if key:
@@ -1659,7 +1803,10 @@ class Viewport3D(QWidget):
         n_f = len(fv)
         ff = np.hstack([np.full((n_f, 1), 3), np.arange(n_f * 3).reshape(-1, 3)])
         fmesh = PolyData(fv.reshape(-1, 3), ff.flatten())
-        actor = self.plotter.add_mesh(fmesh, scalars=rgb, rgb=True, smooth_shading=True)
+        opacity = 0.18 if self.overlay_mode == "xray" else 1.0
+        actor = self.plotter.add_mesh(
+            fmesh, scalars=rgb, rgb=True, smooth_shading=True, opacity=opacity,
+        )
         self._pv_actors[name]["fill"] = actor
 
     def _draw_chills_mpl(self, z_part: float) -> None:
@@ -1684,6 +1831,36 @@ class Viewport3D(QWidget):
             )
             self._add_pv_gating_mesh(faces, CHILL_COLOR, 0.9)
 
+    def _draw_xray_points_mpl(self) -> None:
+        hot = np.asarray(self._sim_fields.get("hot_xyz") or np.zeros((0, 3)))
+        poro = np.asarray(self._sim_fields.get("porosity_xyz") or np.zeros((0, 3)))
+        if len(hot):
+            self.ax.scatter(hot[:, 0], hot[:, 1], hot[:, 2], c="#FAB387", s=12, alpha=0.7)
+        if len(poro):
+            self.ax.scatter(poro[:, 0], poro[:, 1], poro[:, 2], c="#F38BA8", s=22, alpha=0.9)
+
+    def _draw_xray_points_pv(self) -> None:
+        if not self.use_pyvista:
+            return
+        hot = np.asarray(self._sim_fields.get("hot_xyz") or np.zeros((0, 3)))
+        poro = np.asarray(self._sim_fields.get("porosity_xyz") or np.zeros((0, 3)))
+        if len(hot) >= 1:
+            cloud = pv.PolyData(hot)
+            self._pv_particle_actors.append(
+                self.plotter.add_mesh(cloud, color="#FAB387", point_size=8, render_points_as_spheres=True)
+            )
+        if len(poro) >= 1:
+            cloud = pv.PolyData(poro)
+            self._pv_particle_actors.append(
+                self.plotter.add_mesh(cloud, color="#F38BA8", point_size=12, render_points_as_spheres=True)
+            )
+
+    def set_solid_frac(self, frac: float) -> None:
+        """Scrub solid fraction (0 = liquid, 1 = frozen). Feeding stops ~0.7."""
+        self._solidify_frac = float(np.clip(frac, 0.0, 1.0))
+        self._solid_frac_label = True
+        self.render(max(self._anim_frac, 1.0 if self._solidify_frac > 0 else 0.0))
+
     def place_gating(self, kind: str, x: float, y: float, z: float | None = None) -> None:
         """Drop sprue / gate / riser / chill at a clicked world XY."""
         xmin, xmax, ymin, ymax, zmin, zmax = self._compute_bounds()
@@ -1705,6 +1882,21 @@ class Viewport3D(QWidget):
             if "Riser (Open)" not in names:
                 names.append("Riser (Open)")
             self.selected_gating = "Riser (Open)"
+        elif kind == "filter":
+            # parked on the runner just past the sprue
+            self.sprue_offset = np.array([x, y], dtype=float)
+            if "Foam Filter" not in names:
+                names.append("Foam Filter")
+            if "Runner (Horizontal)" not in names:
+                names.append("Runner (Horizontal)")
+            self.selected_gating = "Foam Filter"
+        elif kind == "gate2":
+            self.gate2_offset = np.array([x, y], dtype=float)
+            if "Second Gate" not in names:
+                names.append("Second Gate")
+            if "Fan Gate" not in names:
+                names.append("Fan Gate")
+            self.selected_gating = "Second Gate"
         elif kind == "chill":
             self.chills.append(np.array([x, y, zz], dtype=float))
         self.gating = names
@@ -1721,6 +1913,10 @@ class Viewport3D(QWidget):
             self.gating_selected.emit(self.selected_gating)
 
     def _clock_label(self) -> str:
+        if self._solid_frac_label and self._solidify_frac > 0:
+            fs = self._solidify_frac
+            extra = "   ·   feeding stopped" if fs >= FEEDING_STOP_FRAC else "   ·   still feeding"
+            return f"Solid fraction {fs:.2f}{extra}"
         if self._solidify_frac > 0 and self._clock_solidify_min:
             t = self._solidify_frac * self._clock_solidify_min
             return f"Solidify {t:.2f} / {self._clock_solidify_min:.2f} min"
@@ -1974,6 +2170,26 @@ class Viewport3D(QWidget):
         else:
             self.fig.savefig(path, facecolor=self.fig.get_facecolor(), dpi=120)
 
+    def screenshot_png_bytes(self) -> bytes:
+        import io
+        import os
+        import tempfile
+        if self.use_pyvista:
+            fd, path = tempfile.mkstemp(suffix=".png")
+            os.close(fd)
+            try:
+                self.plotter.screenshot(path)
+                with open(path, "rb") as fh:
+                    return fh.read()
+            finally:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+        buf = io.BytesIO()
+        self.fig.savefig(buf, format="png", facecolor=self.fig.get_facecolor(), dpi=100)
+        return buf.getvalue()
+
     # ------------------------------------------------------------------
     # Transform setters
     # ------------------------------------------------------------------
@@ -2006,10 +2222,18 @@ class Viewport3D(QWidget):
             self.flask_height_in = float(size_tuple[2])
         self.render(self._anim_frac)
 
-    def set_mold_process(self, kind: str, shell_mm: float | None = None) -> None:
-        self.mold_kind = "shell" if kind == "shell" else "sand"
+    def set_mold_process(self, kind: str, shell_mm: float | None = None,
+                         printed_mm: float | None = None) -> None:
+        if kind == "shell":
+            self.mold_kind = "shell"
+        elif kind == "printed":
+            self.mold_kind = "printed"
+        else:
+            self.mold_kind = "sand"
         if shell_mm is not None:
             self.shell_mm = float(shell_mm)
+        if printed_mm is not None:
+            self.printed_mm = float(printed_mm)
         self._pv_flask_key = ()
         self.render(self._anim_frac)
 
@@ -2080,10 +2304,30 @@ class Viewport3D(QWidget):
 
 
 
+    def _gating_state_key(self, z_part: float, zmax: float) -> tuple:
+        """Cache key covering every param that rebuilds gating meshes."""
+        return (
+            tuple(sorted(self.gating)),
+            round(float(z_part), 2), round(float(zmax), 2),
+            tuple(float(v) for v in self.sprue_offset),
+            round(self.runner_y_offset, 2),
+            tuple(float(v) for v in self.riser_offset),
+            tuple(float(v) for v in self.gate2_offset),
+            self.sprue_top_radius, self.sprue_bottom_radius, self.sprue_height,
+            self.runner_width, self.runner_height, self.runner_length, self.gate_area,
+            self.selected_gating, self.restrictive_elem,
+            round(self.riser_radius, 2), round(self.riser_height, 2),
+            round(self.neck_radius, 2), round(self.neck_height, 2),
+            bool(self.riser_blind),
+            round(self.filter_area, 1), round(self.basin_radius, 1), round(self.basin_height, 1),
+            len(self.chills),
+        )
+
     def get_gating_params(self) -> dict:
         has_sprue  = "Tapered Sprue" in self.gating
         has_runner = "Runner (Horizontal)" in self.gating
-        has_gate   = any(c in self.gating for c in ["Fan Gate"])
+        has_gate   = "Fan Gate" in self.gating
+        has_gate2  = "Second Gate" in self.gating
 
 
         xmin, xmax, ymin, ymax, zmin, zmax = self._compute_bounds()
@@ -2096,14 +2340,23 @@ class Viewport3D(QWidget):
             "has_sprue":        has_sprue,
             "has_runner":       has_runner,
             "has_gate":         has_gate,
+            "has_gate2":        has_gate2,
+            "has_filter":       "Foam Filter" in self.gating,
+            "has_basin":        "Pour Basin" in self.gating,
             "sprue_top_r":      self.sprue_top_radius if has_sprue else None,
             "sprue_bot_r":      self.sprue_bottom_radius if has_sprue else None,
             "sprue_height_mm":  head_mm,
             "runner_dia":       self.runner_diameter if has_runner else None,
             "runner_width_mm":  self.runner_width if has_runner else None,
             "runner_height_mm": self.runner_height if has_runner else None,
-            "gate_area_mm2":    self.gate_area if has_gate else None,
+            "gate_area_mm2":    self.gate_area if (has_gate or has_gate2) else None,
+            "filter_area_mm2":  self.filter_area if "Foam Filter" in self.gating else None,
+            "basin_r_mm":       self.basin_radius if "Pour Basin" in self.gating else None,
+            "basin_h_mm":       self.basin_height if "Pour Basin" in self.gating else None,
             "has_riser":        "Riser (Open)" in self.gating,
+            "riser_blind":      bool(self.riser_blind),
+            "neck_r_mm":        self.neck_radius if "Riser (Open)" in self.gating else None,
+            "neck_h_mm":        self.neck_height if "Riser (Open)" in self.gating else None,
             "runner_length_mm": self.runner_length if has_runner else None,
             "riser_r_mm":       self.riser_radius if "Riser (Open)" in self.gating else None,
             "riser_h_mm":       self.riser_height if "Riser (Open)" in self.gating else None,
@@ -2184,7 +2437,7 @@ class Viewport3D(QWidget):
                 pass
             return
 
-        if self.pick_mode in ("sprue", "gate", "riser", "chill"):
+        if self.pick_mode in ("sprue", "gate", "riser", "chill", "filter", "gate2"):
             hit = self._pv_world_on_plane(xy[0], xy[1], z_part)
             z_hit = self._pv_ray_z(xy[0], xy[1], zmin, zmax)
             if hit is not None:
@@ -2322,7 +2575,7 @@ class Viewport3D(QWidget):
             self.parting_picked.emit(frac)
             return
 
-        if self.pick_mode in ("sprue", "gate", "riser", "chill"):
+        if self.pick_mode in ("sprue", "gate", "riser", "chill", "filter", "gate2"):
             if event.xdata is not None and event.ydata is not None:
                 self.place_gating(self.pick_mode, float(event.xdata), float(event.ydata), z_part)
             return

@@ -14,6 +14,7 @@ from simulation.foundry import (
     open_riser_modulus_cm, riser_ok, verdict_from_result, suggested_fixes,
     is_shell_mold, effective_mold_factor, shell_chvorinov_factor,
     recommended_shell_preheat_f, shell_envelope,
+    is_printed_sand, process_kind, neck_modulus_cm,
 )
 from simulation.session import save_session, load_session, default_session
 from simulation.worker import SimWorker
@@ -57,6 +58,14 @@ class TestMoldAndYield:
     def test_aluminum_preheat_default(self):
         assert recommended_shell_preheat_f("A356 Aluminum") == 1100
 
+    def test_printed_sand_process(self):
+        assert is_printed_sand("Printed sand")
+        assert is_printed_sand("binder-jet")
+        assert process_kind("Printed sand") == "printed"
+        assert process_kind("Ceramic shell") == "shell"
+        assert process_kind("Green sand") == "sand"
+        assert mold_factor("Printed sand") < mold_factor("Green sand")
+
     def test_casting_yield(self):
         assert abs(casting_yield_pct(100, 25) - 80.0) < 1e-9
 
@@ -70,6 +79,22 @@ class TestMoldAndYield:
         })
         assert v["sprue"] > 0
         assert abs(v["total"] - v["sprue"]) < 1e-9
+
+    def test_basin_and_second_gate_add_volume(self):
+        base = gating_volumes_cm3({
+            "has_sprue": True, "sprue_top_r": 8, "sprue_bot_r": 4, "sprue_height_mm": 100,
+            "has_gate": True, "gate_area_mm2": 40,
+        })
+        extra = gating_volumes_cm3({
+            "has_sprue": True, "sprue_top_r": 8, "sprue_bot_r": 4, "sprue_height_mm": 100,
+            "has_gate": True, "has_gate2": True, "gate_area_mm2": 40,
+            "has_basin": True, "basin_r_mm": 18, "basin_h_mm": 22,
+            "has_filter": True, "filter_area_mm2": 400,
+        })
+        assert extra["total"] > base["total"]
+        assert extra["gate"] > base["gate"]
+        assert extra["basin"] > 0
+        assert extra["filter"] > 0
 
 
 class TestGatingLayout:
@@ -112,6 +137,18 @@ class TestRiser:
 
     def test_modulus_positive(self):
         assert open_riser_modulus_cm() > 0.3
+
+    def test_blind_riser_modulus_is_lower(self):
+        open_m = open_riser_modulus_cm(20, 60, blind=False)
+        blind_m = open_riser_modulus_cm(20, 60, blind=True)
+        assert blind_m < open_m
+
+    def test_neck_ok_when_wide(self):
+        r = riser_ok(0.8, True, radius_mm=20, height_mm=60, neck_r_mm=16, neck_h_mm=12)
+        assert r["neck_ok"] is True
+        skinny = riser_ok(2.0, True, radius_mm=20, height_mm=60, neck_r_mm=3, neck_h_mm=20)
+        assert skinny["neck_ok"] is False
+        assert neck_modulus_cm(8, 12) > 0
 
     def test_heavy_section_needs_riser(self):
         r = riser_ok(2.0, has_riser=False)
@@ -226,6 +263,42 @@ class TestWorkerFoundry:
         assert r["process"] == "sand"
 
 
+class TestPrintedSandWorker:
+
+    def test_printed_skips_flask_and_burn_on(self):
+        r = run_sim({
+            **BASE_PARAMS, "mold_type": "Printed sand", "mold_temp_f": 200,
+            "printed_mm": 15,
+            "flask_fit": {"fits": False, "need_w_in": 20, "need_d_in": 20, "suggested": "huge"},
+        })
+        assert r["process"] == "printed"
+        blob = " ".join(r["warnings"] + r["defects"]).lower()
+        assert "flask" not in blob
+        assert "burn-on" not in blob
+        assert r["sand_mix"]["kind"] == "printed"
+        assert r["sand_mix"]["sand_lb"] > 0
+
+    def test_filter_can_be_the_choke(self):
+        gating = {
+            "has_sprue": True, "sprue_bot_r": 20.0, "sprue_height_mm": 100,
+            "has_runner": True, "runner_width_mm": 40, "runner_height_mm": 20,
+            "has_gate": True, "gate_area_mm2": 400,
+            "has_filter": True, "filter_area_mm2": 80,
+        }
+        r = run_sim({**BASE_PARAMS, "gating_params": gating})
+        assert r["restrictive_elem"] == "filter"
+
+    def test_second_gate_shortens_fill(self):
+        g1 = {
+            "has_sprue": True, "sprue_bot_r": 20.0, "sprue_height_mm": 100,
+            "has_gate": True, "gate_area_mm2": 40,
+        }
+        g2 = {**g1, "has_gate2": True}
+        t1 = run_sim({**BASE_PARAMS, "gating_params": g1})
+        t2 = run_sim({**BASE_PARAMS, "gating_params": g2})
+        assert t2["fill_time_s"] < t1["fill_time_s"]
+
+
 class TestSession:
 
     def test_round_trip(self, tmp_path=None):
@@ -251,3 +324,18 @@ class TestSession:
         assert loaded["mold_type"] == "Ceramic shell"
         assert loaded["shell_mm"] == 10
         assert loaded["mold_temp_f"] == 1600
+
+    def test_printed_sand_round_trip(self):
+        data = default_session()
+        data["mold_type"] = "Printed sand"
+        data["printed_mm"] = 20
+        data["riser_blind"] = True
+        data["neck_r"] = 10
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "printed.cast.json")
+            save_session(path, data)
+            loaded = load_session(path)
+        assert loaded["mold_type"] == "Printed sand"
+        assert loaded["printed_mm"] == 20
+        assert loaded["riser_blind"] is True
+        assert loaded["neck_r"] == 10

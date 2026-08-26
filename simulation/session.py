@@ -44,6 +44,13 @@ def default_session() -> dict:
         "model_rot": 0,
         "shrink_slider": 106,
         "gating_ratio": "1 : 2 : 2 (non-ferrous)",
+        "printed_mm": 15,
+        "riser_r": 20,
+        "riser_h": 60,
+        "neck_r": 8,
+        "neck_h": 12,
+        "riser_blind": False,
+        "sleeve": False,
     }
 
 

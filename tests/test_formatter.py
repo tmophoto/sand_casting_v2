@@ -13,7 +13,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from results.formatter import build_results_text, empty_results_html
+from results.formatter import build_results_text, empty_results_html, build_traveler_html
 
 
 # ---------------------------------------------------------------------------
@@ -330,4 +330,55 @@ class TestShopTickets:
     def test_unfed_hotspot_row(self):
         text = build({"porosity_frac": 0.08})
         assert "Unfed hot-spot" in text
+
+    def test_sand_mix_section(self):
+        text = build({
+            "sand_mix": {
+                "kind": "green", "sand_lb": 12.5, "clay_lb": 1.0, "water_lb": 0.4,
+                "hint": "12.5 lb sand",
+            }
+        })
+        assert "SAND MIX" in text
+        assert "12.5" in text
+
+    def test_printed_sand_mix_section(self):
+        text = build({
+            "process": "printed", "mold_type": "Printed sand", "printed_mm": 15,
+            "sand_mix": {
+                "kind": "printed", "sand_lb": 4.2, "binder_g": 34.0,
+                "binder_pct": 1.8, "n_vents": 3, "hint": "vents",
+            },
+        })
+        assert "Printed sand" in text
+        assert "wall 15 mm" in text
+        assert "Vents" in text
+
+    def test_empty_results_mentions_printed(self):
+        html = empty_results_html()
+        assert "printed sand" in html.lower()
+
+
+class TestTraveler:
+
+    def test_title_and_verdict(self):
+        html = build_traveler_html({**BASE_RESULT, "verdict": "ok", "setup_label": "green · A356"})
+        assert "Shop traveler" in html
+        assert "Likely OK" in html
+        assert "green · A356" in html
+
+    def test_includes_screenshot_and_tickets(self):
+        html = build_traveler_html(
+            {
+                **BASE_RESULT,
+                "verdict": "risky",
+                "sand_mix": {"hint": "8.1 lb sand · clay"},
+                "melt_ticket": {"pour_mass_lb": 1.2, "n_ingots": 2},
+                "fixes": [{"fix": "Add a riser on the hot spot."}],
+            },
+            screenshot_uri="file:///tmp/shot.png",
+        )
+        assert "file:///tmp/shot.png" in html
+        assert "Sand mix" in html
+        assert "What to change" in html
+        assert "riser" in html.lower()
 

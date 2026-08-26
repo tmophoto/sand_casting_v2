@@ -68,6 +68,13 @@ class TestPorosityAndAnalyze:
         assert out["n_metal"] > 0
         assert "porosity_frac" in out
 
+    def test_analyze_xyz_points(self):
+        mesh = _cube(40.0)
+        out = analyze(mesh, B=3.0, gate_xyz=np.array([20.0, 0.0, 20.0]))
+        assert out["porosity_xyz"].ndim == 2
+        assert out["porosity_xyz"].shape[1] == 3
+        assert out["hot_xyz"].ndim == 2
+
     def test_map_to_faces_length(self):
         mesh = _cube(40.0)
         grid = rasterize(mesh)

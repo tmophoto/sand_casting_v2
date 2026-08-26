@@ -79,11 +79,13 @@ DEFAULT_FLASK_HEIGHT_IN = 6.0
 # Ceramic shell uses this as the *cold* 8 mm baseline; preheat and thickness
 # are applied on top in simulation.foundry.effective_mold_factor().
 CERAMIC_SHELL = "Ceramic shell"
+PRINTED_SAND = "Printed sand"
 MOLD_TYPES = {
     "Green sand": 1.00,
     "Dry sand": 1.15,
     "Resin / no-bake": 0.85,
     CERAMIC_SHELL: 0.62,
+    PRINTED_SAND: 0.90,  # furan binder-jet; more permeable than packed green
 }
 
 # Lost-wax / investment ceramic shell
@@ -91,6 +93,11 @@ DEFAULT_SHELL_MM = 8.0
 SHELL_MM_MIN = 4
 SHELL_MM_MAX = 16
 SHELL_COLOR = "#E8D5B7"
+# Binder-jet / 3D-printed sand (Voxeljet / ExOne style)
+DEFAULT_PRINTED_MM = 15.0
+PRINTED_MM_MIN = 8
+PRINTED_MM_MAX = 40
+PRINTED_SAND_COLOR = "#C4B59A"
 # Typical fired-shell preheat by alloy (°F)
 SHELL_PREHEAT_DEFAULT_F = {
     "A356 Aluminum": 1100,
@@ -163,6 +170,9 @@ FERROUS_METALS = {
 }
 
 CHILL_COLOR = "#89DCEB"
+FILTER_COLOR = "#F5E0C3"
+BASIN_COLOR = "#E8A0BF"
+GATE2_COLOR = "#94E2D5"
 
 # Gate velocity above this (mm/s) is treated as mold-erosion risk
 EROSION_VEL_SAND_MM_S = 500.0
@@ -172,6 +182,14 @@ EROSION_VEL_SHELL_MM_S = 750.0
 LB_G = 453.592
 DEFAULT_INGOT_LB = 1.0
 DEFAULT_FURNACE_LB = 12.0
+# Packed moulding sand (g/cm³) and shop mix fractions
+SAND_BULK_G_CM3 = 1.55
+GREEN_SAND_CLAY_PCT = 8.0
+GREEN_SAND_WATER_PCT = 3.0
+RESIN_BINDER_PCT = 1.2
+PRINTED_BINDER_PCT = 1.8
+IN3_TO_CM3 = 16.387064
+FEEDING_STOP_FRAC = 0.70  # solid fraction where feeding freezes off
 ALLOY_USD_PER_LB = {
     "A356 Aluminum": 2.40,
     "Everdur Bronze (C52100)": 6.50,
@@ -228,5 +246,15 @@ SHOP_RECIPES = {
         "mold_temp_f": 100,
         "gating_ratio": "1 : 4 : 4 (ferrous)",
         "thin_wall": "No",
+    },
+    "A356 printed sand": {
+        "metal": "A356 Aluminum",
+        "process": "printed",
+        "mold_type": "Printed sand",
+        "pour_temp_f": 1300,
+        "mold_temp_f": 80,
+        "printed_mm": 15,
+        "gating_ratio": "1 : 2 : 2 (non-ferrous)",
+        "thin_wall": "Auto",
     },
 }

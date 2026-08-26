@@ -7,9 +7,9 @@ from constants import (
 from simulation.foundry import (
     gating_volumes_cm3, casting_yield_pct, riser_ok,
     verdict_from_result, suggested_fixes, is_shell_mold, effective_mold_factor,
-    recommended_shell_preheat_f,
+    recommended_shell_preheat_f, is_printed_sand, process_kind,
 )
-from simulation.shop import melt_ticket, pattern_ticket
+from simulation.shop import melt_ticket, pattern_ticket, sand_mix_ticket
 
 
 def volumetric_heat_j_cm3(metal: dict, pour_f: float) -> float:
@@ -83,8 +83,13 @@ class SimWorker(QObject):
             candidates.append(("runner", runner_area))
 
         gate_area = gating.get("gate_area_mm2")
-        if gating.get("has_gate") and gate_area:
-            candidates.append(("gate", gate_area))
+        n_gates = int(bool(gating.get("has_gate"))) + int(bool(gating.get("has_gate2")))
+        if n_gates and gate_area:
+            candidates.append(("gate", float(gate_area) * max(n_gates, 1)))
+        if gating.get("has_filter"):
+            fa = float(gating.get("filter_area_mm2") or 400.0)
+            # 10 ppi ceramic foam ≈ 35 % open area, extra Cd hit in the choke list
+            candidates.append(("filter", fa * 0.35))
 
         if not candidates:
             return max(3.0, vol_cm3 / 80.0), "fallback", 0.0
@@ -126,6 +131,8 @@ class SimWorker(QObject):
         mold_name = p.get("mold_type", "Green sand")
         shell_mm = float(p.get("shell_mm", DEFAULT_SHELL_MM))
         shell = is_shell_mold(mold_name)
+        printed = is_printed_sand(mold_name)
+        kind = process_kind(mold_name)
         B = chvorinov_B(metal, pour_f) * effective_mold_factor(
             mold_name, shell_mm=shell_mm, mold_f=mold_f, pour_f=pour_f,
         )
@@ -151,7 +158,7 @@ class SimWorker(QObject):
         cold_shut_need = metal["melt_temp_f"] + 150
         if thin_wall and pour_f < cold_shut_need and not hot_shell:
             defects.append("Cold shut risk — thin wall with low superheat")
-        if not shell and mold_f > 120:
+        if (not shell) and (not printed) and mold_f > 120:
             warnings.append("Burn-on risk — mold temp above 120 F")
         if superheat < effective_min_sh * 2:
             warnings.append(
@@ -195,6 +202,9 @@ class SimWorker(QObject):
             vsr, has_riser,
             radius_mm=gating_params.get("riser_r_mm"),
             height_mm=gating_params.get("riser_h_mm"),
+            blind=bool(gating_params.get("riser_blind")),
+            neck_r_mm=gating_params.get("neck_r_mm"),
+            neck_h_mm=gating_params.get("neck_h_mm"),
         )
         if riser["needed"] and not has_riser:
             if not any("riser" in w.lower() or "porosity" in w.lower() for w in warnings):
@@ -214,8 +224,19 @@ class SimWorker(QObject):
                 f"exceeds {erosion_lim:.0f} mm/s for this mould"
             )
 
+        if has_riser and not riser.get("neck_ok", True):
+            nr = float(gating_params.get("neck_r_mm") or 0.0)
+            rr = float(gating_params.get("riser_r_mm") or 20.0)
+            # Open risers with a shop-sized neck are fine; warn for blind
+            # feeders or an obviously pinched neck.
+            if gating_params.get("riser_blind") or (nr > 0 and nr < 0.4 * rr):
+                warnings.append(
+                    f"Riser neck may freeze first — neck modulus "
+                    f"{riser.get('m_neck_cm', 0):.2f} cm < feeder need"
+                )
+
         flask_info = p.get("flask_fit") or {}
-        if (not shell) and flask_info.get("fits") is False:
+        if (not shell) and (not printed) and flask_info.get("fits") is False:
             sug = flask_info.get("suggested") or "a larger flask"
             warnings.append(
                 f"Flask is too small for the part + {flask_info.get('need_w_in', 0):.1f}×"
@@ -252,6 +273,8 @@ class SimWorker(QObject):
                     "porosity": vx.get("face_porosity"),
                     "niyama": vx.get("face_niyama"),
                     "dist": vx.get("face_dist"),
+                    "porosity_xyz": vx.get("porosity_xyz"),
+                    "hot_xyz": vx.get("hot_xyz"),
                 }
                 if n_unfilled > 0:
                     warnings.append(
@@ -292,7 +315,8 @@ class SimWorker(QObject):
             "yield_pct": yield_pct,
             "mold_type": mold_name,
             "shell_mm": shell_mm if shell else None,
-            "process": "shell" if shell else "sand",
+            "printed_mm": float(p.get("printed_mm") or 0) if printed else None,
+            "process": kind,
             "riser": riser,
             "fill_time_s": fill_time_s,
             "fill_velocity_mm_s": fill_velocity_mm_s,
@@ -318,13 +342,26 @@ class SimWorker(QObject):
         result["pattern_ticket"] = pattern_ticket(
             metal_name, shrink_slider=int(round(shrink_scale * 100)),
         )
+        bbox = p.get("bbox_mm")
+        flask = p.get("flask_fit") or {}
+        result["sand_mix"] = sand_mix_ticket(
+            mold_type=mold_name,
+            part_cm3=vol_cm3,
+            gating_cm3=gating_cm3,
+            flask_w_in=float(flask.get("flask_w_in") or p.get("flask_w_in") or 8),
+            flask_d_in=float(flask.get("flask_d_in") or p.get("flask_d_in") or 10),
+            flask_h_in=float(p.get("flask_h_in") or 6),
+            printed_mm=float(p.get("printed_mm") or 15),
+            bbox_mm=tuple(bbox) if bbox is not None else None,
+            surf_cm2=surf_cm2,
+        )
         result["porosity_frac"] = porosity_frac
         result["n_porosity"] = n_porosity
         result["n_unfilled"] = n_unfilled
         result["niyama_min"] = niyama_min
         result["n_warnings"] = len(warnings)
         result["setup_label"] = p.get("setup_label") or (
-            f"{'shell' if shell else 'sand'} · {metal_name}"
+            f"{kind} · {metal_name}"
         )
         result["voxel_faces"] = voxel_faces
 

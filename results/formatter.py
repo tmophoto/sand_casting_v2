@@ -93,7 +93,7 @@ def empty_results_html() -> str:
         f'<div style="color:{_C["heading"]};font-size:15px;font-weight:700;padding-bottom:8px;">Ready when you are</div>'
         f'<div style="color:{_C["label"]};font-size:12px;line-height:1.55;">'
         f'1. Drop a part (STL or OBJ) or try the demo<br>'
-        f'2. Pick sand or ceramic shell<br>'
+        f'2. Pick sand, ceramic shell, or printed sand<br>'
         f'3. Click a face to drop a sprue, or hit Size gating<br>'
         f'4. Hit <b style="color:{_C["value"]};">Simulate pour</b>'
         f'</div></body></html>'
@@ -138,6 +138,8 @@ def build_results_text(r: dict) -> str:
     mold_label = r.get("mold_type", "Green sand")
     if r.get("process") == "shell" and r.get("shell_mm"):
         mold_label = f"{mold_label} ({r['shell_mm']:.0f} mm)"
+    elif r.get("process") == "printed" and r.get("printed_mm"):
+        mold_label = f"{mold_label} (wall {r['printed_mm']:.0f} mm)"
     rows.append(_row("Mold",      mold_label))
     rows.append(_row("Pour temp", f"{r.get('pour_f', 0):.0f} °F"))
     mold_temp_name = "Shell preheat" if r.get("process") == "shell" else "Mold temp"
@@ -192,6 +194,26 @@ def build_results_text(r: dict) -> str:
         ))
         if mt.get("usd_per_lb"):
             rows.append(_row("Alloy $", f"${mt.get('alloy_usd', 0):.2f}  (${mt['usd_per_lb']:.2f}/lb)"))
+        rows.append(_divider())
+
+    sm = r.get("sand_mix") or {}
+    if sm:
+        rows.append(_section("SAND MIX"))
+        if sm.get("kind") == "shell":
+            rows.append(_row("Sand", "n/a — ceramic shell"))
+        elif sm.get("kind") == "printed":
+            rows.append(_row("Print sand", f"{sm.get('sand_lb', 0):.1f} lb"))
+            rows.append(_row("Binder", f"{sm.get('binder_g', 0):.0f} g  ({sm.get('binder_pct', 0):.1f} %)"))
+            rows.append(_row("Vents", f"~{sm.get('n_vents', 1)} in the print box"))
+        else:
+            rows.append(_row("Sand", f"{sm.get('sand_lb', 0):.1f} lb"))
+            if sm.get("clay_lb") is not None:
+                rows.append(_row("Clay", f"{sm.get('clay_lb', 0):.2f} lb"))
+                rows.append(_row("Water", f"{sm.get('water_lb', 0):.2f} lb"))
+            if sm.get("binder_g"):
+                rows.append(_row("Resin", f"{sm.get('binder_g', 0):.0f} g"))
+        if sm.get("hint"):
+            rows.append(_row("Recipe", sm["hint"]))
         rows.append(_divider())
 
     pt = r.get("pattern_ticket") or {}
@@ -272,3 +294,70 @@ def build_results_text(r: dict) -> str:
         + "</table>"
     )
     return f'<html><body style="background:{_C["bg"]};margin:4px;">{table}</body></html>'
+
+
+def build_traveler_html(r: dict, screenshot_uri: str | None = None) -> str:
+    """One-page shop traveler: screenshot, verdict, tickets, what to change."""
+    key = r.get("verdict") or (
+        "fail" if r.get("defects") else ("risky" if r.get("warnings") else "ok")
+    )
+    verdict, fg, _bg = _VERDICT.get(key, _VERDICT["risky"])
+    title = html.escape(str(r.get("setup_label") or r.get("metal") or "Casting job"))
+    img = ""
+    if screenshot_uri:
+        img = (
+            f'<div style="text-align:center;padding:8px 0 12px 0;">'
+            f'<img src="{html.escape(screenshot_uri)}" '
+            f'style="max-width:100%;max-height:260px;border:1px solid #ccc;"/></div>'
+        )
+
+    def row(lab: str, val: str) -> str:
+        return (
+            f'<tr><td style="color:#555;padding:2px 10px 2px 0;white-space:nowrap;">{lab}</td>'
+            f'<td style="color:#111;padding:2px 0;">{val}</td></tr>'
+        )
+
+    rows = [
+        row("Metal", html.escape(str(r.get("metal", "—")))),
+        row("Process", html.escape(str(r.get("mold_type") or r.get("process") or "—"))),
+        row("Pour", f"{r.get('pour_f', 0):.0f} °F"),
+        row("Fill", f"{r.get('fill_time_s', 0):.1f} s"),
+        row("Solidify", f"{r.get('t_solidify_min', 0):.2f} min"),
+    ]
+    if r.get("yield_pct") is not None:
+        rows.append(row("Yield", f"{r['yield_pct']:.0f} %"))
+    mt = r.get("melt_ticket") or {}
+    if mt:
+        rows.append(row("Melt", f"{mt.get('pour_mass_lb', 0):.2f} lb  ·  {mt.get('n_ingots', 0)} ingots"))
+    sm = r.get("sand_mix") or {}
+    if sm.get("hint"):
+        rows.append(row("Sand mix", html.escape(str(sm["hint"]))))
+    table = (
+        '<table style="width:100%;border-collapse:collapse;font-size:12px;">'
+        + "".join(rows) + "</table>"
+    )
+    fixes = r.get("fixes") or []
+    change = ""
+    if fixes:
+        items = "".join(
+            f'<li>{html.escape(item.get("fix") or item.get("text") or "")}</li>'
+            for item in fixes if (item.get("fix") or item.get("text"))
+        )
+        change = f'<div style="font-weight:700;padding:10px 0 4px 0;">What to change</div><ul>{items}</ul>'
+    elif r.get("defects") or r.get("warnings"):
+        items = "".join(
+            f'<li>{html.escape(x)}</li>' for x in (r.get("defects") or []) + (r.get("warnings") or [])
+        )
+        change = f'<div style="font-weight:700;padding:10px 0 4px 0;">Notes</div><ul>{items}</ul>'
+    else:
+        change = '<div style="color:#1a7f37;padding-top:10px;">No defect risks flagged.</div>'
+    return (
+        f'<html><body style="background:#fff;color:#111;margin:18px;'
+        f'font-family:Segoe UI,sans-serif;font-size:12px;">'
+        f'<div style="font-size:20px;font-weight:700;">Shop traveler</div>'
+        f'<div style="color:#555;padding:2px 0 8px 0;">{title}</div>'
+        f'<div style="font-size:16px;font-weight:700;color:{fg};padding-bottom:8px;">'
+        f'{html.escape(verdict)}</div>'
+        f'{img}{table}{change}'
+        f'</body></html>'
+    )

@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from constants import SHOP_RECIPES, FERROUS_METALS, shrink_scale_from_slider
 from simulation.shop import (
     recipe, recipe_names, size_rigging, melt_ticket, pattern_ticket,
-    write_pattern_stl, compare_setups,
+    write_pattern_stl, compare_setups, sand_mix_ticket,
 )
 from tests.test_geometry import unit_cube_mesh
 
@@ -33,6 +33,11 @@ class TestRecipes:
         rec = recipe("Gray iron sand")
         assert "1 : 4 : 4" in rec["gating_ratio"]
         assert rec["metal"] in FERROUS_METALS
+
+    def test_printed_sand_recipe(self):
+        rec = recipe("A356 printed sand")
+        assert rec["process"] == "printed"
+        assert rec["printed_mm"] == 15
 
 
 class TestRiggingWizard:
@@ -58,6 +63,12 @@ class TestRiggingWizard:
         small = size_rigging(50.0, 80.0, "A356 Aluminum")
         big = size_rigging(800.0, 400.0, "A356 Aluminum")
         assert big["gate_area_mm2"] >= small["gate_area_mm2"]
+
+    def test_wizard_includes_neck_and_basin(self):
+        s = size_rigging(200.0, 180.0, "A356 Aluminum")
+        assert s["neck_r_mm"] > 0
+        assert s["basin_r_mm"] > 0
+        assert s["filter_area_mm2"] > s["gate_area_mm2"]
 
 
 class TestMeltTicket:
@@ -101,3 +112,39 @@ class TestCompare:
         d = compare_setups(a, b)
         assert abs(d["fill_time_s"]["d"] - 2.0) < 1e-9
         assert d["a_label"] == "sand"
+
+
+class TestSandMixTicket:
+
+    def test_green_sand_mix(self):
+        t = sand_mix_ticket(
+            mold_type="Green sand", part_cm3=200.0, gating_cm3=40.0,
+            flask_w_in=8, flask_d_in=10, flask_h_in=6,
+        )
+        assert t["kind"] == "green"
+        assert t["sand_lb"] > 0
+        assert t["clay_lb"] > 0
+        assert t["water_lb"] > 0
+
+    def test_resin_mix(self):
+        t = sand_mix_ticket(
+            mold_type="Resin / no-bake", part_cm3=200.0, gating_cm3=40.0,
+            flask_w_in=8, flask_d_in=10, flask_h_in=6,
+        )
+        assert t["kind"] == "resin"
+        assert t["binder_g"] > 0
+
+    def test_printed_mix(self):
+        t = sand_mix_ticket(
+            mold_type="Printed sand", part_cm3=200.0, gating_cm3=40.0,
+            printed_mm=15, bbox_mm=(80, 60, 40), surf_cm2=180.0,
+        )
+        assert t["kind"] == "printed"
+        assert t["n_vents"] >= 1
+        assert t["sand_lb"] > 0
+        assert "vent" in t["hint"].lower()
+
+    def test_shell_has_no_sand_heap(self):
+        t = sand_mix_ticket(mold_type="Ceramic shell", part_cm3=200.0, gating_cm3=20.0)
+        assert t["kind"] == "shell"
+        assert t["sand_lb"] == 0.0

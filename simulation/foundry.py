@@ -10,6 +10,7 @@ import numpy as np
 from constants import (
     FLASK_SIZES, METAL_DEFAULTS, MOLD_TYPES, DRAFT_MIN_DEG,
     CERAMIC_SHELL, DEFAULT_SHELL_MM, SHELL_PREHEAT_DEFAULT_F,
+    PRINTED_SAND,
 )
 
 # Open riser as drawn in the viewport (mm)
@@ -32,6 +33,26 @@ def is_shell_mold(name: str) -> bool:
         "lost-wax",
         "ceramic-shell",
     }
+
+
+def is_printed_sand(name: str) -> bool:
+    key = str(name or "").strip().lower()
+    return key in {
+        PRINTED_SAND.lower(),
+        "printed sand",
+        "binder jet",
+        "binder-jet",
+        "3d printed sand",
+        "3d-printed sand",
+    }
+
+
+def process_kind(name: str) -> str:
+    if is_shell_mold(name):
+        return "shell"
+    if is_printed_sand(name):
+        return "printed"
+    return "sand"
 
 
 def recommended_shell_preheat_f(metal_name: str) -> int:
@@ -94,11 +115,18 @@ def cylinder_cm3(radius_mm: float, height_mm: float) -> float:
 
 def gating_volumes_cm3(gating: dict) -> dict[str, float]:
     """Metal sitting in sprue / runner / gate / riser (cm³), matching viewport solids."""
-    vols = {"sprue": 0.0, "runner": 0.0, "gate": 0.0, "riser": 0.0}
+    vols = {
+        "sprue": 0.0, "runner": 0.0, "gate": 0.0, "riser": 0.0,
+        "basin": 0.0, "filter": 0.0, "neck": 0.0,
+    }
     if gating.get("has_sprue") and gating.get("sprue_bot_r"):
         top = gating.get("sprue_top_r") or gating["sprue_bot_r"]
         h = float(gating.get("sprue_height_mm") or 100.0)
         vols["sprue"] = truncated_cone_cm3(top, gating["sprue_bot_r"], h)
+    if gating.get("has_basin") and gating.get("sprue_top_r"):
+        br = float(gating.get("basin_r_mm") or (float(gating["sprue_top_r"]) * 2.2))
+        bh = float(gating.get("basin_h_mm") or 22.0)
+        vols["basin"] = cylinder_cm3(br, bh)
     if gating.get("has_runner"):
         w = float(gating.get("runner_width_mm") or 0.0)
         hh = float(gating.get("runner_height_mm") or 0.0)
@@ -107,13 +135,23 @@ def gating_volumes_cm3(gating: dict) -> dict[str, float]:
             vols["runner"] = w * hh * length / 1000.0
         elif gating.get("runner_dia"):
             vols["runner"] = cylinder_cm3(gating["runner_dia"] / 2.0, length)
-    if gating.get("has_gate") and gating.get("gate_area_mm2"):
-        vols["gate"] = float(gating["gate_area_mm2"]) * _GATE_LENGTH_MM / 1000.0
+    if gating.get("has_filter"):
+        fa = float(gating.get("filter_area_mm2") or 400.0)
+        ft = float(gating.get("filter_t_mm") or 12.0)
+        vols["filter"] = fa * ft / 1000.0
+    if (gating.get("has_gate") or gating.get("has_gate2")) and gating.get("gate_area_mm2"):
+        n_gates = float(bool(gating.get("has_gate"))) + float(bool(gating.get("has_gate2")))
+        n_gates = max(n_gates, 1.0)
+        vols["gate"] = float(gating["gate_area_mm2"]) * _GATE_LENGTH_MM / 1000.0 * n_gates
     if gating.get("has_riser"):
         r = float(gating.get("riser_r_mm") or _RISER_R_MM)
         h = float(gating.get("riser_h_mm") or _RISER_H_MM)
         vols["riser"] = cylinder_cm3(r, h)
-    vols["total"] = vols["sprue"] + vols["runner"] + vols["gate"] + vols["riser"]
+        nr = float(gating.get("neck_r_mm") or 0.0)
+        nh = float(gating.get("neck_h_mm") or 0.0)
+        if nr > 0 and nh > 0:
+            vols["neck"] = cylinder_cm3(nr, nh)
+    vols["total"] = sum(v for k, v in vols.items() if k != "total")
     return vols
 
 
@@ -264,12 +302,31 @@ def undercut_hints(
     }
 
 
-def open_riser_modulus_cm(radius_mm: float = _RISER_R_MM, height_mm: float = _RISER_H_MM) -> float:
-    """V/A for an open-top cylinder (lateral + bottom only), in cm."""
+def open_riser_modulus_cm(
+    radius_mm: float = _RISER_R_MM,
+    height_mm: float = _RISER_H_MM,
+    blind: bool = False,
+) -> float:
+    """V/A for a cylinder. Open: lateral + bottom. Blind: also the top."""
     r = float(radius_mm) / 10.0
     h = float(height_mm) / 10.0
     vol = math.pi * r * r * h
     area = 2.0 * math.pi * r * h + math.pi * r * r
+    if blind:
+        area += math.pi * r * r
+    return vol / max(area, 1e-9)
+
+
+def neck_modulus_cm(radius_mm: float, height_mm: float) -> float:
+    """Connected neck between riser and casting — lateral cooling only.
+
+    The two ends sit on the riser and the hot spot, so they are not free
+    surfaces. Counting them would make every shop-sized neck look too light.
+    """
+    r = float(radius_mm) / 10.0
+    h = max(float(height_mm) / 10.0, 0.2)
+    vol = math.pi * r * r * h
+    area = 2.0 * math.pi * r * h
     return vol / max(area, 1e-9)
 
 
@@ -279,19 +336,31 @@ def riser_ok(
     safety: float = 1.2,
     radius_mm: float | None = None,
     height_mm: float | None = None,
+    blind: bool = False,
+    neck_r_mm: float | None = None,
+    neck_h_mm: float | None = None,
 ) -> dict:
-    """Compare an open riser's modulus to the part V/A (hot-spot proxy)."""
+    """Compare an open/blind riser's modulus to the part V/A (hot-spot proxy)."""
     m_riser = open_riser_modulus_cm(
         radius_mm if radius_mm is not None else _RISER_R_MM,
         height_mm if height_mm is not None else _RISER_H_MM,
+        blind=blind,
     )
     need = float(part_vsr_cm) * safety
     adequate = bool(has_riser) and m_riser + 1e-9 >= need
+    neck_ok = True
+    m_neck = 0.0
+    if has_riser and neck_r_mm:
+        m_neck = neck_modulus_cm(neck_r_mm, neck_h_mm or 12.0)
+        neck_ok = m_neck + 1e-9 >= need * 0.7
     return {
         "has_riser": bool(has_riser),
+        "blind": bool(blind),
         "m_riser_cm": m_riser,
         "m_need_cm": need,
+        "m_neck_cm": m_neck,
         "adequate": adequate,
+        "neck_ok": neck_ok,
         "needed": float(part_vsr_cm) > 1.5,
     }
 
@@ -304,6 +373,8 @@ def choke_location(restrictive: str, sprue_xy, riser_xy, z_part: float, zmax: fl
         return (float(sx), float(sy), float(z_part))
     if restrictive == "gate":
         return (float(sx), float(sy) - 4.0, float(z_part))
+    if restrictive == "filter":
+        return (float(sx), float(sy) + 18.0, float(z_part))
     return None
 
 
@@ -447,6 +518,18 @@ def suggested_fixes(r: dict, gating: dict | None = None) -> list[dict]:
                 "kind": "misrun_risk",
                 "text": w,
                 "fix": "Place the gate lower, or add a second gate on the unfilled lobe.",
+            })
+        elif "neck" in low:
+            fixes.append({
+                "kind": "shrinkage_risk",
+                "text": w,
+                "fix": "Widen the riser neck — it is freezing before the hot spot can feed.",
+            })
+        elif "vent" in low:
+            fixes.append({
+                "kind": "other",
+                "text": w,
+                "fix": "Add vents on the cope / print box (printed sand needs air paths, not draft).",
             })
         elif "flask" in low:
             fixes.append({

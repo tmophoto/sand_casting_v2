@@ -267,6 +267,17 @@ def niyama_proxy(freeze_s: np.ndarray, pitch_mm: float) -> np.ndarray:
     return freeze_s / (grad + 1.0)
 
 
+def voxel_xyz(mask: np.ndarray, origin: np.ndarray, pitch: float, cap: int = 600) -> np.ndarray:
+    """World-space centers of True voxels, subsampled for X-ray paint."""
+    ijk = np.argwhere(mask)
+    if len(ijk) == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    if len(ijk) > cap:
+        rng = np.random.default_rng(0)
+        ijk = ijk[rng.choice(len(ijk), size=cap, replace=False)]
+    return (origin + (ijk + 0.5) * float(pitch)).astype(np.float32)
+
+
 def map_to_faces(
     vectors: np.ndarray,
     field: np.ndarray,
@@ -348,4 +359,9 @@ def analyze(
         "face_porosity": map_to_faces(vectors, poro.astype(np.float32), origin, pitch),
         "face_niyama": map_to_faces(vectors, ny, origin, pitch),
         "face_dist": map_to_faces(vectors, dist, origin, pitch),
+        "porosity_xyz": voxel_xyz(poro, origin, pitch),
+        "hot_xyz": voxel_xyz(
+            occ & (freeze >= 0.82 * (float(freeze[occ].max()) if np.any(occ) else 1.0)),
+            origin, pitch, cap=400,
+        ),
     }

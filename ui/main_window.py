@@ -7,23 +7,24 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QTextBrowser, QFrame,
 )
 from PyQt6.QtCore import Qt, QThread, QUrl
-from PyQt6.QtGui import QKeySequence, QDragEnterEvent, QDropEvent, QShortcut
+from PyQt6.QtGui import QKeySequence, QDragEnterEvent, QDropEvent, QShortcut, QPixmap
 import numpy as np
 from ui.style import APP_STYLE
 from ui.collapsible import CollapsiblePanel
 from ui.demo_part import build_demo_mesh, DEMO_PART_NAME
 from viewport.viewport import Viewport3D
 from simulation.worker import SimWorker
-from results.formatter import build_results_text, empty_results_html
+from results.formatter import build_results_text, empty_results_html, build_traveler_html
 from constants import (
     METAL_DEFAULTS, FLASK_SIZES, shrink_scale_from_slider, DEFAULT_FLASK_HEIGHT_IN,
     MOLD_TYPES, GATING_RATIOS, DEFAULT_SHELL_MM, SHELL_MM_MIN,
-    SHELL_MM_MAX, CERAMIC_SHELL, SHOP_RECIPES,
+    SHELL_MM_MAX, CERAMIC_SHELL, SHOP_RECIPES, PRINTED_SAND,
+    DEFAULT_PRINTED_MM, PRINTED_MM_MIN, PRINTED_MM_MAX, FEEDING_STOP_FRAC,
 )
 from simulation.mesh_tools import scale_geometry, local_thickness, THIN_WALL_MM
 from simulation.foundry import (
     apply_gating_ratio, flask_fit, recommended_pour_band, draft_analysis,
-    undercut_hints, is_shell_mold, recommended_shell_preheat_f,
+    undercut_hints, is_shell_mold, is_printed_sand, recommended_shell_preheat_f,
 )
 from simulation.shop import (
     size_rigging, recipe as shop_recipe, write_pattern_stl, compare_setups,
@@ -54,7 +55,8 @@ class MainWindow(QMainWindow):
         self._baseline_result = None
 
         self.viewport = Viewport3D()
-        self._sand_molds = [n for n in MOLD_TYPES if n != CERAMIC_SHELL]
+        self._sand_molds = [n for n in MOLD_TYPES if n not in (CERAMIC_SHELL, PRINTED_SAND)]
+        self._baseline_pixmap = None
         self._build_ui()
         self._wire_signals()
         self._refresh_recents()
@@ -135,6 +137,12 @@ class MainWindow(QMainWindow):
         self.compare_label.setObjectName("hint")
         self.compare_label.setWordWrap(True)
         right_l.addWidget(self.compare_label)
+        self.compare_shot = QLabel("")
+        self.compare_shot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.compare_shot.setMinimumHeight(0)
+        self.compare_shot.setMaximumHeight(180)
+        self.compare_shot.setVisible(False)
+        right_l.addWidget(self.compare_shot)
         self.results_text = QTextBrowser()
         self.results_text.setOpenExternalLinks(False)
         self.results_text.setOpenLinks(False)
@@ -182,6 +190,9 @@ class MainWindow(QMainWindow):
         self.open_btn.setObjectName("ghostBtn")
         self.export_btn = QPushButton("Export")
         self.export_btn.setObjectName("ghostBtn")
+        self.traveler_btn = QPushButton("Traveler PDF")
+        self.traveler_btn.setObjectName("ghostBtn")
+        self.traveler_btn.setToolTip("One-page shop traveler: screenshot, tickets, verdict.")
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.progress_bar.setMaximumWidth(200)
@@ -197,6 +208,7 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.save_btn)
         bar.addWidget(self.open_btn)
         bar.addWidget(self.export_btn)
+        bar.addWidget(self.traveler_btn)
         return chrome
 
     def _build_step_bar(self) -> QFrame:
@@ -206,7 +218,7 @@ class MainWindow(QMainWindow):
         row.setContentsMargins(6, 0, 6, 0)
         for text in (
             "1  Open a part",
-            "2  Pick sand or shell",
+            "2  Pick sand, shell, or printed sand",
             "3  Place gating",
             "4  Simulate",
         ):
@@ -250,7 +262,7 @@ class MainWindow(QMainWindow):
         box = QWidget()
         lay = QVBoxLayout(box)
         lay.setContentsMargins(0, 0, 0, 0)
-        hint = QLabel("Same part, two shop methods. Pick one — flask vs fired shell.")
+        hint = QLabel("Same part, three shop methods. Flask, fired shell, or binder-jet sand.")
         hint.setWordWrap(True)
         hint.setObjectName("hint")
         lay.addWidget(hint)
@@ -265,8 +277,13 @@ class MainWindow(QMainWindow):
         self.shell_btn.setObjectName("processBtn")
         self.shell_btn.setCheckable(True)
         self.shell_btn.setToolTip("Investment / lost-wax. Preheat the fired shell.")
+        self.printed_btn = QPushButton("Printed sand")
+        self.printed_btn.setObjectName("processBtn")
+        self.printed_btn.setCheckable(True)
+        self.printed_btn.setToolTip("Binder-jet mold. No flask, no draft — add vents.")
         row.addWidget(self.sand_btn)
         row.addWidget(self.shell_btn)
+        row.addWidget(self.printed_btn)
         lay.addLayout(row)
         lay.addWidget(self._caption("Shop recipe"))
         self.recipe_combo = QComboBox()
@@ -290,20 +307,29 @@ class MainWindow(QMainWindow):
         self.gating_hint.setStyleSheet("color: #A6ADC8;")
         lay.addWidget(self.gating_hint)
         place = QHBoxLayout()
+        place2 = QHBoxLayout()
         self.pick_sprue_btn = QPushButton("Sprue")
         self.pick_gate_btn = QPushButton("Gate")
         self.pick_riser_btn = QPushButton("Riser")
         self.pick_chill_btn = QPushButton("Chill")
+        self.pick_filter_btn = QPushButton("Filter")
+        self.pick_gate2_btn = QPushButton("Gate 2")
         for b, tip in (
             (self.pick_sprue_btn, "Click the part to drop the sprue."),
             (self.pick_gate_btn, "Click a face to drop the fan gate."),
-            (self.pick_riser_btn, "Click the hot spot to drop an open riser."),
+            (self.pick_riser_btn, "Click the hot spot to drop a riser."),
             (self.pick_chill_btn, "Click a thick section to plant a chill."),
+            (self.pick_filter_btn, "Click to drop a ceramic foam filter on the runner."),
+            (self.pick_gate2_btn, "Click a second face for a second gate."),
         ):
             b.setObjectName("ghostBtn")
             b.setToolTip(tip)
+        for b in (self.pick_sprue_btn, self.pick_gate_btn, self.pick_riser_btn, self.pick_chill_btn):
             place.addWidget(b)
+        for b in (self.pick_filter_btn, self.pick_gate2_btn):
+            place2.addWidget(b)
         lay.addLayout(place)
+        lay.addLayout(place2)
         self.wizard_btn = QPushButton("Size sprue, runner, gate, riser")
         self.wizard_btn.setObjectName("primaryBtn")
         self.wizard_btn.setToolTip(
@@ -312,13 +338,19 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.wizard_btn)
 
         self.gating_checkboxes = {}
-        for comp in ["Tapered Sprue", "Runner (Horizontal)", "Fan Gate", "Riser (Open)"]:
+        for comp in [
+            "Tapered Sprue", "Runner (Horizontal)", "Fan Gate", "Riser (Open)",
+            "Pour Basin", "Foam Filter", "Second Gate",
+        ]:
             cb = QCheckBox(comp)
             self.gating_checkboxes[comp] = cb
             lay.addWidget(cb)
         self.sleeve_cb = QCheckBox("Insulating sleeve on riser")
         self.sleeve_cb.setToolTip("Slows freeze around the riser (exothermic / sleeve).")
         lay.addWidget(self.sleeve_cb)
+        self.blind_cb = QCheckBox("Blind riser (closed top)")
+        self.blind_cb.setToolTip("Blind risers cool from the top too — size them larger, add a neck.")
+        lay.addWidget(self.blind_cb)
 
         lay.addWidget(QLabel("Ratio preset"))
         self.ratio_combo = QComboBox()
@@ -381,6 +413,12 @@ class MainWindow(QMainWindow):
         )
         self.riser_h_slider, self.riser_h_label = self._mm_slider(
             risl, "Riser height", 24, 120, 60, "Open-riser height (mm).",
+        )
+        self.neck_r_slider, self.neck_r_label = self._mm_slider(
+            risl, "Neck radius", 3, 20, 8, "Riser neck radius (mm).",
+        )
+        self.neck_h_slider, self.neck_h_label = self._mm_slider(
+            risl, "Neck height", 4, 30, 12, "Riser neck length (mm).",
         )
         self.riser_x_slider, self.riser_x_label = self._mm_slider(risl, "Riser X", -200, 200, 0)
         self.riser_y_slider, self.riser_y_label = self._mm_slider(risl, "Riser Y", -200, 200, 0)
@@ -502,6 +540,30 @@ class MainWindow(QMainWindow):
         self._flask_shell_box.setVisible(False)
         lay.addWidget(self._flask_shell_box)
 
+        self._flask_printed_box = QWidget()
+        pr = QVBoxLayout(self._flask_printed_box)
+        pr.setContentsMargins(0, 0, 0, 0)
+        self.printed_hint = QLabel(
+            "Binder-jet sand (Voxeljet / ExOne style): print the mold around the part. "
+            "No flask, no draft. Add vents so air can leave."
+        )
+        self.printed_hint.setWordWrap(True)
+        self.printed_hint.setStyleSheet("color: #A6ADC8; font-size: 11px;")
+        pr.addWidget(self.printed_hint)
+        self.printed_mm_slider = QSlider(Qt.Orientation.Horizontal)
+        self.printed_mm_slider.setMinimum(PRINTED_MM_MIN)
+        self.printed_mm_slider.setMaximum(PRINTED_MM_MAX)
+        self.printed_mm_slider.setValue(int(DEFAULT_PRINTED_MM))
+        self.printed_mm_label = QLabel(f"Print-box wall: {int(DEFAULT_PRINTED_MM)} mm")
+        pr.addWidget(self.printed_mm_label)
+        pr.addWidget(self.printed_mm_slider)
+        self.printed_vent_label = QLabel("")
+        self.printed_vent_label.setWordWrap(True)
+        self.printed_vent_label.setObjectName("hint")
+        pr.addWidget(self.printed_vent_label)
+        self._flask_printed_box.setVisible(False)
+        lay.addWidget(self._flask_printed_box)
+
         panel.content_layout.addWidget(box)
         parent.addWidget(panel)
         panel.setExpanded(False)
@@ -592,6 +654,7 @@ class MainWindow(QMainWindow):
         self.overlay_combo.addItem("Fill order", "fill")
         self.overlay_combo.addItem("Porosity", "porosity")
         self.overlay_combo.addItem("Niyama proxy", "niyama")
+        self.overlay_combo.addItem("X-ray (interior)", "xray")
         self.clip_cb = QCheckBox("Cut plane")
         self.clip_axis_combo = QComboBox()
         self.clip_axis_combo.addItems(["X", "Y", "Z"])
@@ -612,6 +675,13 @@ class MainWindow(QMainWindow):
         clip_row.addWidget(self.clip_slider)
         lay.addLayout(clip_row)
         lay.addWidget(self.clip_label)
+        lay.addWidget(self._caption("Solid fraction"))
+        self.solid_frac_slider = QSlider(Qt.Orientation.Horizontal)
+        self.solid_frac_slider.setRange(0, 100)
+        self.solid_frac_slider.setValue(0)
+        self.solid_frac_label = QLabel("Liquid  ·  feeding stops at 70%")
+        lay.addWidget(self.solid_frac_label)
+        lay.addWidget(self.solid_frac_slider)
         lay.addWidget(self.inspect_label)
         panel.content_layout.addWidget(box)
         parent.addWidget(panel)
@@ -640,6 +710,7 @@ class MainWindow(QMainWindow):
         self.sim_btn.clicked.connect(self._on_simulate)
         self.reset_btn.clicked.connect(self._on_reset)
         self.export_btn.clicked.connect(self._on_export)
+        self.traveler_btn.clicked.connect(self._on_traveler)
         self.save_btn.clicked.connect(self._on_save_session)
         self.open_btn.clicked.connect(self._on_open_session)
         self.recent_list.itemClicked.connect(self._on_recent_clicked)
@@ -654,9 +725,13 @@ class MainWindow(QMainWindow):
         self.mold_combo.currentTextChanged.connect(self._on_mold_changed)
         self.sand_btn.clicked.connect(lambda: self._set_process("sand"))
         self.shell_btn.clicked.connect(lambda: self._set_process("shell"))
+        self.printed_btn.clicked.connect(lambda: self._set_process("printed"))
         self.pour_spin.valueChanged.connect(self._on_pour_changed)
         self.mold_spin.valueChanged.connect(self._on_mold_temp_changed)
         self.shell_mm_slider.valueChanged.connect(self._on_shell_mm_changed)
+        self.printed_mm_slider.valueChanged.connect(self._on_printed_mm_changed)
+        self.blind_cb.toggled.connect(self._on_blind)
+        self.solid_frac_slider.valueChanged.connect(self._on_solid_frac)
 
         self.flask_combo.currentTextChanged.connect(self._on_flask_changed)
         self.flask_h_slider.valueChanged.connect(self._on_flask_height_changed)
@@ -681,6 +756,7 @@ class MainWindow(QMainWindow):
             self.sprue_top_slider, self.sprue_bot_slider, self.sprue_h_slider,
             self.runner_w_slider, self.runner_h_slider, self.gate_area_slider,
             self.riser_r_slider, self.riser_h_slider,
+            self.neck_r_slider, self.neck_h_slider,
         ):
             sl.valueChanged.connect(lambda _v: self._on_gating_dims())
         self._on_gating_dims()
@@ -692,6 +768,8 @@ class MainWindow(QMainWindow):
         self.pick_gate_btn.clicked.connect(lambda: self._start_place("gate"))
         self.pick_riser_btn.clicked.connect(lambda: self._start_place("riser"))
         self.pick_chill_btn.clicked.connect(lambda: self._start_place("chill"))
+        self.pick_filter_btn.clicked.connect(lambda: self._start_place("filter"))
+        self.pick_gate2_btn.clicked.connect(lambda: self._start_place("gate2"))
         self.recipe_combo.currentTextChanged.connect(self._on_recipe)
         self.export_pattern_btn.clicked.connect(self._on_export_pattern)
         self.keep_a_btn.clicked.connect(self._on_keep_a)
@@ -745,6 +823,9 @@ class MainWindow(QMainWindow):
         self.viewport.set_gating_offset(sx, sy, 0, rx, ry)
 
     def _on_gating_dims(self) -> None:
+        self.viewport.neck_radius = float(self.neck_r_slider.value())
+        self.viewport.neck_height = float(self.neck_h_slider.value())
+        self.viewport.riser_blind = self.blind_cb.isChecked()
         self.viewport.set_gating_dimensions(
             sprue_top_r=self.sprue_top_slider.value(),
             sprue_bot_r=self.sprue_bot_slider.value(),
@@ -764,7 +845,7 @@ class MainWindow(QMainWindow):
         for key, w in self._gating_dim_widgets.items():
             w.setVisible(key == name)
         self.viewport.set_selected_gating(name)
-        if name:
+        if name and name in self.gating_checkboxes:
             self.gating_checkboxes[name].setChecked(True)
             self.gating_hint.setText(f"Editing {name}. Drag in 3D to place.")
 
@@ -822,6 +903,8 @@ class MainWindow(QMainWindow):
             "gate": "Click a face to drop the fan gate…",
             "riser": "Click the hot spot to drop the riser…",
             "chill": "Click a thick section to plant a chill…",
+            "filter": "Click to drop a foam filter on the runner…",
+            "gate2": "Click a second face for Gate 2…",
         }
         self.gating_hint.setText(labels.get(kind, "Click the viewport…"))
 
@@ -855,7 +938,12 @@ class MainWindow(QMainWindow):
         self.gate_area_slider.setValue(int(round(sized["gate_area_mm2"])))
         self.riser_r_slider.setValue(int(round(sized["riser_r_mm"])))
         self.riser_h_slider.setValue(int(round(sized["riser_h_mm"])))
-        for name in ("Tapered Sprue", "Runner (Horizontal)", "Fan Gate", "Riser (Open)"):
+        self.neck_r_slider.setValue(int(round(sized.get("neck_r_mm", 8))))
+        self.neck_h_slider.setValue(int(round(sized.get("neck_h_mm", 12))))
+        self.viewport.basin_radius = float(sized.get("basin_r_mm", 18))
+        self.viewport.basin_height = float(sized.get("basin_h_mm", 22))
+        self.viewport.filter_area = float(sized.get("filter_area_mm2", 400))
+        for name in ("Tapered Sprue", "Runner (Horizontal)", "Fan Gate", "Riser (Open)", "Pour Basin"):
             self.gating_checkboxes[name].setChecked(True)
         self._on_gating_dims()
         self.gating_hint.setText(
@@ -874,8 +962,8 @@ class MainWindow(QMainWindow):
         self._push_undo()
         if rec.get("metal"):
             self.metal_combo.setCurrentText(rec["metal"])
-        self._set_process("shell" if rec.get("process") == "shell" else "sand")
-        if rec.get("mold_type") and rec.get("process") != "shell":
+        self._set_process(rec.get("process") or "sand")
+        if rec.get("mold_type") and rec.get("process") == "sand":
             idx = self.mold_combo.findText(rec["mold_type"])
             if idx >= 0:
                 self.mold_combo.setCurrentIndex(idx)
@@ -885,6 +973,8 @@ class MainWindow(QMainWindow):
             self.mold_spin.setValue(int(rec["mold_temp_f"]))
         if rec.get("shell_mm") is not None:
             self.shell_mm_slider.setValue(int(rec["shell_mm"]))
+        if rec.get("printed_mm") is not None:
+            self.printed_mm_slider.setValue(int(rec["printed_mm"]))
         if rec.get("gating_ratio"):
             self.ratio_combo.setCurrentText(rec["gating_ratio"])
         if rec.get("thin_wall"):
@@ -920,10 +1010,21 @@ class MainWindow(QMainWindow):
         self._baseline_result.pop("voxel_faces", None)
         label = self._last_result.get("setup_label", "A")
         self.compare_label.setText(f"A stored: {label}. Change setup and simulate for B.")
+        try:
+            data = self.viewport.screenshot_png_bytes()
+            pix = QPixmap()
+            pix.loadFromData(data)
+            self._baseline_pixmap = pix
+            self.compare_shot.setPixmap(pix.scaledToHeight(170, Qt.TransformationMode.SmoothTransformation))
+            self.compare_shot.setVisible(True)
+        except Exception:
+            self.compare_shot.setVisible(False)
 
     def _on_clear_a(self) -> None:
         self._baseline_result = None
+        self._baseline_pixmap = None
         self.compare_label.setText("")
+        self.compare_shot.setVisible(False)
 
     def _on_overlay_combo(self) -> None:
         mode = self.overlay_combo.currentData() or ""
@@ -944,6 +1045,7 @@ class MainWindow(QMainWindow):
                 "fill": "Gravity-flood fill order from the gate.",
                 "porosity": "Isolated liquid — shrinkage cavities.",
                 "niyama": "Low Niyama (dark) → shrinkage risk.",
+                "xray": "Ghosted skin; peach = last-to-freeze, pink = isolated liquid.",
             }.get(str(mode), ""))
         else:
             self._on_inspect()
@@ -992,15 +1094,27 @@ class MainWindow(QMainWindow):
     def _is_shell(self) -> bool:
         return bool(self.shell_btn.isChecked())
 
-    def _set_process(self, kind: str) -> None:
-        sand = kind != "shell"
+    def _is_printed(self) -> bool:
+        return bool(self.printed_btn.isChecked())
+
+    def _process_kind(self) -> str:
+        if self._is_shell():
+            return "shell"
+        if self._is_printed():
+            return "printed"
+        return "sand"
+
+    def _set_process(self, kind: str, set_preheat: bool = True) -> None:
         self.sand_btn.blockSignals(True)
         self.shell_btn.blockSignals(True)
-        self.sand_btn.setChecked(sand)
-        self.shell_btn.setChecked(not sand)
+        self.printed_btn.blockSignals(True)
+        self.sand_btn.setChecked(kind == "sand")
+        self.shell_btn.setChecked(kind == "shell")
+        self.printed_btn.setChecked(kind == "printed")
         self.sand_btn.blockSignals(False)
         self.shell_btn.blockSignals(False)
-        self._sync_process_ui(set_preheat=True)
+        self.printed_btn.blockSignals(False)
+        self._sync_process_ui(set_preheat=set_preheat)
         self._refresh_status()
 
     def _on_mold_changed(self, _text: str = "") -> None:
@@ -1017,17 +1131,41 @@ class MainWindow(QMainWindow):
         self.shell_mm_label.setText(f"Fired shell: {val} mm")
         self.viewport.set_mold_process("shell", shell_mm=val)
 
+    def _on_printed_mm_changed(self, val: int) -> None:
+        self.printed_mm_label.setText(f"Print-box wall: {val} mm")
+        self.viewport.set_mold_process("printed", printed_mm=val)
+        self._refresh_printed_vents()
+
+    def _on_blind(self, on: bool) -> None:
+        self.viewport.riser_blind = bool(on)
+        self.viewport.render(self.viewport._anim_frac)
+
+    def _on_solid_frac(self, val: int) -> None:
+        frac = val / 100.0
+        stop = "feeding stopped" if frac >= FEEDING_STOP_FRAC else "still feeding"
+        self.solid_frac_label.setText(f"Solid fraction {frac:.2f}  ·  {stop} (stops ~70%)")
+        if self.viewport.models:
+            self.viewport.set_solid_frac(frac)
+
+    def _refresh_printed_vents(self) -> None:
+        surf = float(self._geometry_stats.get("surf_cm2") or 0)
+        n = max(1, int((surf / 80.0) + 0.999)) if surf else 1
+        self.printed_vent_label.setText(
+            f"Suggest ~{n} vents in the print box. Draft is optional."
+        )
+
     def _sync_process_ui(self, set_preheat: bool = False) -> None:
-        shell = self._is_shell()
+        kind = self._process_kind()
         metal_name = self.metal_combo.currentText()
         rec = recommended_shell_preheat_f(metal_name)
-        self._flask_sand_box.setVisible(not shell)
-        self._flask_shell_box.setVisible(shell)
-        self.mold_combo.setVisible(not shell)
-        self.sand_type_label.setVisible(not shell)
-        self.flask_panel.setTitle("Ceramic shell" if shell else "Flask")
-        self.preheat_band_label.setVisible(shell)
-        if shell:
+        self._flask_sand_box.setVisible(kind == "sand")
+        self._flask_shell_box.setVisible(kind == "shell")
+        self._flask_printed_box.setVisible(kind == "printed")
+        self.mold_combo.setVisible(kind == "sand")
+        self.sand_type_label.setVisible(kind == "sand")
+        self.preheat_band_label.setVisible(kind == "shell")
+        if kind == "shell":
+            self.flask_panel.setTitle("Ceramic shell")
             self.mold_hint.setText(
                 "Ceramic shell (investment / lost-wax). Preheat the fired shell; skip the sand flask."
             )
@@ -1044,7 +1182,26 @@ class MainWindow(QMainWindow):
             self.draft_cb.setText("Draft overlay (wax die — optional)")
             self.viewport.set_mold_process("shell", shell_mm=self.shell_mm_slider.value())
             self.flask_panel.setExpanded(True)
+        elif kind == "printed":
+            self.flask_panel.setTitle("Print box")
+            self.mold_hint.setText(
+                "Binder-jet sand. No flask, no draft. Permeability and vents replace cope/drag."
+            )
+            self.mold_spin.setRange(32, 400)
+            if set_preheat:
+                self.mold_spin.setValue(80)
+            self.mold_temp_label.setText(f"Mold temp: {self.mold_spin.value()} °F")
+            self.parting_hint.setText(
+                "Printed sand has no parting — this plane is only the sprue/gate height."
+            )
+            self.pick_parting_btn.setToolTip("Click to set sprue/gate height (no cope/drag).")
+            self.undercut_cb.setText("Undercut overlay (printed sand: ignore)")
+            self.draft_cb.setText("Draft overlay (printed sand — optional)")
+            self.viewport.set_mold_process("printed", printed_mm=self.printed_mm_slider.value())
+            self._refresh_printed_vents()
+            self.flask_panel.setExpanded(True)
         else:
+            self.flask_panel.setTitle("Flask")
             self.mold_hint.setText("")
             self.mold_spin.setRange(32, 400)
             if set_preheat:
@@ -1148,9 +1305,14 @@ class MainWindow(QMainWindow):
             self.viewport.set_overlay_mode("draft")
             mesh = self.viewport.world_meshes()
             if mesh is not None:
-                min_deg = 0.5 if self._is_shell() else 1.5
-                d = draft_analysis(mesh, min_deg=min_deg)
-                kind = "wax-die draft" if self._is_shell() else "sand draft"
+                min_deg = 0.0 if self._is_printed() else (0.5 if self._is_shell() else 1.5)
+                d = draft_analysis(mesh, min_deg=max(min_deg, 0.1))
+                if self._is_printed():
+                    kind = "draft (printed sand — optional, undercuts are fine)"
+                elif self._is_shell():
+                    kind = "wax-die draft"
+                else:
+                    kind = "sand draft"
                 self.inspect_label.setText(
                     f"{d['lock_count']} faces below {min_deg:.1f}° {kind} "
                     f"({100 * d['lock_frac']:.0f}% of the surface)."
@@ -1170,6 +1332,11 @@ class MainWindow(QMainWindow):
                     self.inspect_label.setText(
                         f"{u['count']} faces would undercut a two-part sand mold "
                         f"({100 * u['frac']:.0f}%). Lost-wax: wax melts out — cores only if hollow."
+                    )
+                elif self._is_printed():
+                    self.inspect_label.setText(
+                        f"{u['count']} faces would undercut a two-part sand mold "
+                        f"({100 * u['frac']:.0f}%). Printed sand: ignore — binder-jet has no pull."
                     )
                 else:
                     self.inspect_label.setText(
@@ -1287,8 +1454,12 @@ class MainWindow(QMainWindow):
             "metal": self.metal_combo.currentText(),
             "pour_temp_f": self.pour_spin.value(),
             "mold_temp_f": self.mold_spin.value(),
-            "mold_type": CERAMIC_SHELL if self._is_shell() else self.mold_combo.currentText(),
+            "mold_type": (
+                CERAMIC_SHELL if self._is_shell()
+                else (PRINTED_SAND if self._is_printed() else self.mold_combo.currentText())
+            ),
             "shell_mm": self.shell_mm_slider.value(),
+            "printed_mm": self.printed_mm_slider.value(),
             "thin_wall": self.thin_combo.currentText(),
             "parting_pct": self.parting_slider.value(),
             "flask": self.flask_combo.currentText(),
@@ -1300,6 +1471,12 @@ class MainWindow(QMainWindow):
             "runner_width": self.runner_w_slider.value(),
             "runner_height": self.runner_h_slider.value(),
             "gate_area": self.gate_area_slider.value(),
+            "riser_r": self.riser_r_slider.value(),
+            "riser_h": self.riser_h_slider.value(),
+            "neck_r": self.neck_r_slider.value(),
+            "neck_h": self.neck_h_slider.value(),
+            "riser_blind": self.blind_cb.isChecked(),
+            "sleeve": self.sleeve_cb.isChecked(),
             "sprue_x": self.sprue_x_slider.value(),
             "sprue_y": self.sprue_y_slider.value(),
             "riser_x": self.riser_x_slider.value(),
@@ -1328,17 +1505,20 @@ class MainWindow(QMainWindow):
         self.mold_combo.blockSignals(True)
         mold = data.get("mold_type") or "Green sand"
         if is_shell_mold(mold):
-            self.sand_btn.setChecked(False)
-            self.shell_btn.setChecked(True)
+            self._set_process("shell", set_preheat=False)
+        elif is_printed_sand(mold):
+            self._set_process("printed", set_preheat=False)
         else:
-            self.sand_btn.setChecked(True)
-            self.shell_btn.setChecked(False)
+            self._set_process("sand", set_preheat=False)
             if mold in self._sand_molds:
                 self.mold_combo.setCurrentText(mold)
         self.mold_combo.blockSignals(False)
         self.shell_mm_slider.blockSignals(True)
         self.shell_mm_slider.setValue(int(data.get("shell_mm", DEFAULT_SHELL_MM)))
         self.shell_mm_slider.blockSignals(False)
+        self.printed_mm_slider.blockSignals(True)
+        self.printed_mm_slider.setValue(int(data.get("printed_mm", DEFAULT_PRINTED_MM)))
+        self.printed_mm_slider.blockSignals(False)
         self._sync_process_ui(set_preheat=False)
         self.pour_spin.setValue(int(data.get("pour_temp_f", 1300)))
         self.mold_spin.setValue(int(data.get("mold_temp_f", 100)))
@@ -1357,6 +1537,12 @@ class MainWindow(QMainWindow):
         self.runner_w_slider.setValue(int(data.get("runner_width", 10)))
         self.runner_h_slider.setValue(int(data.get("runner_height", 8)))
         self.gate_area_slider.setValue(int(data.get("gate_area", 40)))
+        self.riser_r_slider.setValue(int(data.get("riser_r", 20)))
+        self.riser_h_slider.setValue(int(data.get("riser_h", 60)))
+        self.neck_r_slider.setValue(int(data.get("neck_r", 8)))
+        self.neck_h_slider.setValue(int(data.get("neck_h", 12)))
+        self.blind_cb.setChecked(bool(data.get("riser_blind")))
+        self.sleeve_cb.setChecked(bool(data.get("sleeve")))
         self.sprue_x_slider.setValue(int(data.get("sprue_x", 0)))
         self.sprue_y_slider.setValue(int(data.get("sprue_y", 0)))
         self.riser_x_slider.setValue(int(data.get("riser_x", 0)))
@@ -1460,8 +1646,12 @@ class MainWindow(QMainWindow):
             "metal": metal_name,
             "pour_temp_f": self.pour_spin.value(),
             "mold_temp_f": self.mold_spin.value(),
-            "mold_type": CERAMIC_SHELL if self._is_shell() else self.mold_combo.currentText(),
+            "mold_type": (
+                CERAMIC_SHELL if self._is_shell()
+                else (PRINTED_SAND if self._is_printed() else self.mold_combo.currentText())
+            ),
             "shell_mm": self.shell_mm_slider.value(),
+            "printed_mm": self.printed_mm_slider.value(),
             "thin_wall": self._thin_wall_flag(),
             "shrinkage": metal_params["shrinkage_pct"],
             "gate_types": [n for n, cb in self.gating_checkboxes.items() if cb.isChecked()],
@@ -1472,7 +1662,8 @@ class MainWindow(QMainWindow):
             "runner_y_offset": self.viewport.runner_y_offset,
             "shrink_scale": scale,
             "z_max": z_max,
-            "flask_fit": {} if self._is_shell() else self._current_flask_fit(),
+            "flask_fit": {} if (self._is_shell() or self._is_printed()) else self._current_flask_fit(),
+            "flask_h_in": self.flask_h_slider.value(),
         }
         mesh = self.viewport.world_meshes()
         if mesh is not None:
@@ -1489,8 +1680,9 @@ class MainWindow(QMainWindow):
         ) if gp.get("has_riser") else None
         params["chills_xyz"] = list(self.viewport.chills)
         params["sleeve"] = self.sleeve_cb.isChecked()
+        params["bbox_mm"] = (xmax - xmin, ymax - ymin, zmax - zmin)
         params["setup_label"] = (
-            f"{'shell' if self._is_shell() else self.mold_combo.currentText()} · {metal_name}"
+            f"{PRINTED_SAND if self._is_printed() else ('shell' if self._is_shell() else self.mold_combo.currentText())} · {metal_name}"
         )
         self.progress_bar.setVisible(True)
         self.sim_btn.setEnabled(False)
@@ -1611,6 +1803,11 @@ class MainWindow(QMainWindow):
         self.clip_cb.setChecked(False)
         self.sleeve_cb.setChecked(False)
         self.overlay_combo.setCurrentIndex(0)
+        self.blind_cb.setChecked(False)
+        self.solid_frac_slider.setValue(0)
+        self.solid_frac_label.setText("Liquid  ·  feeding stops at 70%")
+        self.viewport.riser_blind = False
+        self.viewport.set_solid_frac(0.0)
 
     def _on_export(self) -> None:
         if not self._last_result:
@@ -1653,6 +1850,48 @@ class MainWindow(QMainWindow):
             return
         QMessageBox.information(self, "Export", f"Saved:\n{path}")
 
+    def _on_traveler(self) -> None:
+        if not self._last_result:
+            QMessageBox.information(self, "Traveler", "Run a simulation first.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Shop traveler PDF", "shop_traveler.pdf", "PDF (*.pdf)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        import os
+        import tempfile
+        shot_path = None
+        try:
+            fd, shot_path = tempfile.mkstemp(suffix=".png")
+            os.close(fd)
+            try:
+                self.viewport.screenshot(shot_path)
+                uri = Path(shot_path).as_uri()
+            except Exception:
+                uri = None
+            html = build_traveler_html(self._last_result, screenshot_uri=uri)
+            from PyQt6.QtGui import QTextDocument
+            from PyQt6.QtPrintSupport import QPrinter
+            printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+            printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+            printer.setOutputFileName(path)
+            doc = QTextDocument()
+            doc.setHtml(html)
+            doc.print(printer)
+        except Exception as e:
+            QMessageBox.critical(self, "Traveler failed", str(e))
+            return
+        finally:
+            if shot_path:
+                try:
+                    os.unlink(shot_path)
+                except OSError:
+                    pass
+        QMessageBox.information(self, "Traveler", f"Saved:\n{path}")
+
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
@@ -1674,7 +1913,10 @@ class MainWindow(QMainWindow):
         else:
             part = "No part"
         metal = self.metal_combo.currentText()
-        proc = "Ceramic shell" if self._is_shell() else self.mold_combo.currentText()
+        proc = (
+            PRINTED_SAND if self._is_printed()
+            else ("Ceramic shell" if self._is_shell() else self.mold_combo.currentText())
+        )
         self._status.setText(f"{part}    ·    {metal}    ·    {proc}")
 
     def closeEvent(self, event) -> None:

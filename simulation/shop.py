@@ -17,12 +17,18 @@ from constants import (
     DEFAULT_FURNACE_LB,
     DEFAULT_INGOT_LB,
     FERROUS_METALS,
+    GREEN_SAND_CLAY_PCT,
+    GREEN_SAND_WATER_PCT,
+    IN3_TO_CM3,
     LB_G,
     METAL_DEFAULTS,
+    PRINTED_BINDER_PCT,
+    RESIN_BINDER_PCT,
+    SAND_BULK_G_CM3,
     SHOP_RECIPES,
     shrink_scale_from_slider,
 )
-from simulation.foundry import apply_gating_ratio, open_riser_modulus_cm
+from simulation.foundry import apply_gating_ratio, is_printed_sand, is_shell_mold, open_riser_modulus_cm
 
 
 # Target fill time for the wizard (seconds). Short enough to avoid
@@ -91,6 +97,11 @@ def size_rigging(
         "target_fill_s": WIZARD_FILL_S,
         "casting_va_cm": round(va, 3),
         "riser_mod_cm": round(open_riser_modulus_cm(riser_r, riser_h_mm), 3),
+        "neck_r_mm": round(max(4.0, min(20.0, riser_r * 0.5)), 1),
+        "neck_h_mm": 12.0,
+        "basin_r_mm": round(min(40.0, max(12.0, sprue_top_r * 2.2)), 1),
+        "basin_h_mm": 22.0,
+        "filter_area_mm2": round(min(900.0, max(100.0, sized["gate_area_mm2"] * 4.0)), 1),
     }
 
 
@@ -146,6 +157,88 @@ def pattern_ticket(
         "hint": (
             f"Print the pattern STL at ×{scale:.3f} "
             f"({print_pct:+.1f}% vs as-cast) for lost-PLA / 3D-print patterns."
+        ),
+    }
+
+
+def sand_mix_ticket(
+    *,
+    mold_type: str,
+    part_cm3: float,
+    gating_cm3: float,
+    flask_w_in: float = 8.0,
+    flask_d_in: float = 10.0,
+    flask_h_in: float = 6.0,
+    printed_mm: float = 15.0,
+    bbox_mm: tuple[float, float, float] | None = None,
+    surf_cm2: float = 0.0,
+) -> dict:
+    """Pounds of sand (and clay / water / binder) for this flask or print box."""
+    cavity = max(float(part_cm3) + float(gating_cm3), 0.0)
+    if is_shell_mold(mold_type):
+        return {
+            "kind": "shell",
+            "sand_lb": 0.0,
+            "hint": "Ceramic shell — no sand heap. Weigh slurry and stucco by coat, not by flask.",
+        }
+    if is_printed_sand(mold_type):
+        if bbox_mm:
+            sx, sy, sz = bbox_mm
+        else:
+            sx = sy = sz = max(cavity ** (1.0 / 3.0) * 10.0, 40.0)
+        t = float(printed_mm)
+        env_cm3 = ((sx + 2 * t) * (sy + 2 * t) * (sz + 2 * t)) / 1000.0
+        print_cm3 = max(env_cm3 - cavity, 0.0)
+        sand_g = print_cm3 * SAND_BULK_G_CM3
+        binder_g = sand_g * PRINTED_BINDER_PCT / 100.0
+        n_vents = max(1, int(math.ceil(max(float(surf_cm2), 50.0) / 80.0)))
+        return {
+            "kind": "printed",
+            "print_cm3": round(print_cm3, 1),
+            "sand_lb": round(sand_g / LB_G, 2),
+            "binder_g": round(binder_g, 1),
+            "binder_pct": PRINTED_BINDER_PCT,
+            "wall_mm": t,
+            "n_vents": n_vents,
+            "hint": (
+                f"Print box ~{print_cm3:.0f} cm³ of furan sand "
+                f"({sand_g / LB_G:.1f} lb) + {binder_g:.0f} g binder. "
+                f"Add ~{n_vents} vents — no draft, no flask."
+            ),
+        }
+    flask_cm3 = float(flask_w_in) * float(flask_d_in) * float(flask_h_in) * IN3_TO_CM3
+    sand_cm3 = max(flask_cm3 - cavity, 0.0)
+    sand_g = sand_cm3 * SAND_BULK_G_CM3
+    sand_lb = sand_g / LB_G
+    resin = "resin" in str(mold_type).lower() or "no-bake" in str(mold_type).lower()
+    if resin:
+        binder_g = sand_g * RESIN_BINDER_PCT / 100.0
+        return {
+            "kind": "resin",
+            "flask_cm3": round(flask_cm3, 1),
+            "sand_cm3": round(sand_cm3, 1),
+            "sand_lb": round(sand_lb, 2),
+            "binder_g": round(binder_g, 1),
+            "binder_pct": RESIN_BINDER_PCT,
+            "hint": (
+                f"{sand_lb:.1f} lb sand in a {flask_w_in:.0f}×{flask_d_in:.0f}×{flask_h_in:.0f} in flask "
+                f"+ {binder_g:.0f} g resin ({RESIN_BINDER_PCT} %)."
+            ),
+        }
+    clay_lb = sand_lb * GREEN_SAND_CLAY_PCT / 100.0
+    water_lb = sand_lb * GREEN_SAND_WATER_PCT / 100.0
+    return {
+        "kind": "green",
+        "flask_cm3": round(flask_cm3, 1),
+        "sand_cm3": round(sand_cm3, 1),
+        "sand_lb": round(sand_lb, 2),
+        "clay_lb": round(clay_lb, 2),
+        "water_lb": round(water_lb, 2),
+        "clay_pct": GREEN_SAND_CLAY_PCT,
+        "water_pct": GREEN_SAND_WATER_PCT,
+        "hint": (
+            f"{sand_lb:.1f} lb sand · {clay_lb:.2f} lb clay ({GREEN_SAND_CLAY_PCT:.0f} %) · "
+            f"{water_lb:.2f} lb water ({GREEN_SAND_WATER_PCT:.0f} %)."
         ),
     }
 
