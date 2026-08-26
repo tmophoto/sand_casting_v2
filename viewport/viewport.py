@@ -20,9 +20,11 @@ except ImportError:
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
     from matplotlib.figure import Figure
 from constants import (COPE_COLOR, DRAG_COLOR, SPRUE_COLOR, RUNNER_COLOR,
-                       GATE_COLOR, RISER_COLOR, MODEL_COLORS, METAL_PBR)
+                       GATE_COLOR, RISER_COLOR, MODEL_COLORS, METAL_PBR,
+                       DEFAULT_FLASK_HEIGHT_IN)
 from simulation.mesh_tools import (
-    inspect_mesh, cluster_decimate, aabb_depths, find_defect_sites,
+    inspect_mesh, invert_winding, qem_decimate, local_thickness,
+    find_defect_sites, THIN_WALL_MM,
 )
 
 # Optional GPU array backend (falls back to NumPy transparently)
@@ -54,6 +56,7 @@ class Viewport3D(QWidget):
 
 
     gating_moved = pyqtSignal(dict)
+    model_moved = pyqtSignal(dict)
 
 
 
@@ -69,6 +72,7 @@ class Viewport3D(QWidget):
         self.parting_z: float = 0.5
         self.gating: list     = []
         self.flask_size       = (8, 10)
+        self.flask_height_in  = float(DEFAULT_FLASK_HEIGHT_IN)
 
 
         self.sprue_offset  = np.array([0.0, 60.0])
@@ -289,7 +293,12 @@ class Viewport3D(QWidget):
         _, unique_idx = np.unique(centroids, axis=0, return_index=True)
         vectors = vectors[unique_idx]
 
-        vectors = cluster_decimate(vectors, max_tris=25_000)
+        quality = inspect_mesh(vectors)
+        if quality["inverted"]:
+            vectors = invert_winding(vectors)
+
+        vectors = qem_decimate(vectors, max_tris=25_000)
+        thickness = local_thickness(vectors)
 
         loaded.vectors = vectors
 
@@ -304,6 +313,7 @@ class Viewport3D(QWidget):
             "mesh":        loaded,
             "render_data": vectors,
             "normals":     _cross,   # unit face normals in local space (n, 3)
+            "thickness":   thickness,
         }
         self.transforms[name] = {
             "offset":   np.array([0.0, 0.0, 0.0]),
@@ -340,6 +350,7 @@ class Viewport3D(QWidget):
                 "vol_cm3": 0.0, "surf_cm2": 0.0, "z_min": 0.0, "z_max": 0.0,
                 "watertight": False, "inverted": False,
                 "mesh_warnings": ["Mesh has no triangles."],
+                "min_wall_mm": 0.0, "thin_wall_auto": False,
             }
 
         v0, v1, v2 = verts[:, 0], verts[:, 1], verts[:, 2]
@@ -350,6 +361,8 @@ class Viewport3D(QWidget):
         area_mm2 = float(xp.sum(xp.linalg.norm(cross, axis=1)) / 2.0)
 
         quality = inspect_mesh(np.asarray(mesh.vectors, dtype=np.float64))
+        thick = local_thickness(np.asarray(mesh.vectors, dtype=np.float64))
+        min_wall = float(np.min(thick)) if len(thick) else 0.0
 
         return {
             "vol_cm3":  vol_mm3  / 1000.0,
@@ -359,6 +372,8 @@ class Viewport3D(QWidget):
             "watertight": quality["watertight"],
             "inverted":   quality["inverted"],
             "mesh_warnings": quality["warnings"],
+            "min_wall_mm": min_wall,
+            "thin_wall_auto": min_wall < THIN_WALL_MM,
         }
 
 
@@ -490,7 +505,7 @@ class Viewport3D(QWidget):
 
             # Fill / solidification overlay
             if self._solidify_frac > 0:
-                self._add_mpl_solidify_overlay(verts)
+                self._add_mpl_solidify_overlay(name, verts)
             elif anim_frac > 0:
                 fill_z    = zmin + part_h * anim_frac
                 fill_mask = centroids_z <= fill_z
@@ -601,7 +616,7 @@ class Viewport3D(QWidget):
         # 4. Flask outline — cached, rebuild only when bounds/size change
         # ----------------------------------------------------------------
         flask_key = (round(zmin, 1), round(zmax, 1), self.flask_size,
-                     round(z_part, 1))
+                     round(self.flask_height_in, 2), round(z_part, 1))
         if flask_key != self._pv_flask_key:
             for a in self._pv_flask_actors:
                 self.plotter.remove_actor(a)
@@ -612,8 +627,9 @@ class Viewport3D(QWidget):
             hw, hh = fw_mm / 2, fh_mm / 2
             xs = [-hw, hw, hw, -hw, -hw]
             ys = [-hh, -hh, hh, hh, -hh]
-            for z, col, lw in [(zmin - 5, "#45475A", 2),
-                                (zmax + 5, "#45475A", 2),
+            z_bot, z_top = self._flask_z_extents(zmin, zmax)
+            for z, col, lw in [(z_bot, "#45475A", 2),
+                                (z_top, "#45475A", 2),
                                 (z_part,   "#89B4FA", 3)]:
                 pts  = np.column_stack([xs, ys, [z] * 5])
                 line = pv.PolyData(pts)
@@ -664,11 +680,10 @@ class Viewport3D(QWidget):
         xs = [-hw, hw, hw, -hw, -hw]
         ys = [-hh, -hh, hh, hh, -hh]
 
-
         _, _, _, _, zmin, zmax = self._compute_bounds()
+        z_bot, z_top = self._flask_z_extents(zmin, zmax)
 
-
-        for z, color in [(zmin - 5, "#45475A"), (zmax + 5, "#45475A"), (z_part, "#89B4FA")]:
+        for z, color in [(z_bot, "#45475A"), (z_top, "#45475A"), (z_part, "#89B4FA")]:
             self.ax.plot(xs, ys, [z] * 5, color=color,
                          linestyle="--" if z != z_part else "-",
                          linewidth=1.2 if z != z_part else 1.8, alpha=0.7)
@@ -697,10 +712,10 @@ class Viewport3D(QWidget):
 
 
         _, _, _, _, zmin, zmax = self._compute_bounds()
-
+        z_bot, z_top = self._flask_z_extents(zmin, zmax)
 
         # Draw bottom and top lines
-        for z in [zmin - 5, zmax + 5]:
+        for z in [z_bot, z_top]:
             points = np.column_stack([xs, ys, [z] * 5])
             line = pv.PolyData(points)
             line.lines = np.array([len(xs), 0, 1, 2, 3, 4, 0])
@@ -787,11 +802,12 @@ class Viewport3D(QWidget):
         }
         if "Tapered Sprue" in self.gating:
             sx, sy = self.sprue_offset
+            z_bot, sprue_h = self._sprue_z_and_height(z_part, zmax)
             faces = self._make_cylinder_mesh(
-                cx=sx, cy=sy, z_bottom=zmax,
+                cx=sx, cy=sy, z_bottom=z_bot,
                 r_bottom=self.sprue_bottom_radius,
                 r_top=self.sprue_top_radius,
-                height=self.sprue_height, sides=24,
+                height=sprue_h, sides=24,
             )
             self._add_pv_gating_mesh(faces, *_gating_colors["Tapered Sprue"])
 
@@ -874,11 +890,12 @@ class Viewport3D(QWidget):
         if "Tapered Sprue" in self.gating:
             sx, sy = self.sprue_offset
             def _build_sprue():
+                z_bot, sprue_h = self._sprue_z_and_height(z_part, zmax)
                 faces = self._make_cylinder_mesh(
-                    cx=sx, cy=sy, z_bottom=zmax,
+                    cx=sx, cy=sy, z_bottom=z_bot,
                     r_bottom=self.sprue_bottom_radius,
                     r_top=self.sprue_top_radius,
-                    height=self.sprue_height, sides=24,
+                    height=sprue_h, sides=24,
                 )
                 colors = self._shade_faces(faces, self._hex_to_rgb(SPRUE_COLOR), alpha=0.85)
                 return faces, colors
@@ -948,7 +965,8 @@ class Viewport3D(QWidget):
             return
         sx, sy = self.sprue_offset
         _, _, _, _, zmin, zmax = self._compute_bounds()
-        top_z = zmax + self.sprue_height
+        z_bot, sprue_h = self._sprue_z_and_height(z_part, zmax)
+        top_z = z_bot + sprue_h
 
         np.random.seed(int(anim_frac * 1000) % 1000)
         n_particles = int(15 + anim_frac * 5)
@@ -979,7 +997,8 @@ class Viewport3D(QWidget):
             return
         sx, sy = self.sprue_offset
         _, _, _, _, zmin, zmax = self._compute_bounds()
-        top_z = zmax + self.sprue_height
+        z_bot, sprue_h = self._sprue_z_and_height(z_part, zmax)
+        top_z = z_bot + sprue_h
 
         np.random.seed(int(anim_frac * 1000) % 1000)
         n_particles = int(15 + anim_frac * 5)
@@ -1262,9 +1281,27 @@ class Viewport3D(QWidget):
         pbr = METAL_PBR.get(self.active_metal, {})
         return self._hex_to_rgb(pbr.get("color", "#C8C8C8"))
 
-    def _add_mpl_solidify_overlay(self, verts: np.ndarray) -> None:
-        """Surface-first freeze: shallow AABB-depth faces solidify first."""
-        depths = aabb_depths(verts)
+    def _flask_z_extents(self, zmin: float, zmax: float) -> tuple[float, float]:
+        """Drag floor and cope lid from the flask height (inches) and part AABB."""
+        z_bot = zmin - 10.0
+        z_top = max(zmax + 10.0, z_bot + float(self.flask_height_in) * 25.4)
+        return z_bot, z_top
+
+    def _sprue_z_and_height(self, z_part: float, zmax: float) -> tuple[float, float]:
+        """Sprue sits on the parting plane and rises through the cope to the basin."""
+        cope = max(0.0, float(zmax) - float(z_part))
+        return float(z_part), float(self.sprue_height) + cope
+
+    def _face_thickness(self, name: str, verts: np.ndarray) -> np.ndarray:
+        data = self.models.get(name) or {}
+        stored = data.get("thickness")
+        if stored is not None and len(stored) == len(verts):
+            return np.asarray(stored, dtype=np.float64) * float(self.shrink_scale)
+        return local_thickness(verts)
+
+    def _add_mpl_solidify_overlay(self, name: str, verts: np.ndarray) -> None:
+        """Surface-first freeze: thin local sections solidify first."""
+        depths = self._face_thickness(name, verts)
         if len(depths) == 0:
             return
         dmax = max(float(depths.max()), 1e-9)
@@ -1278,7 +1315,7 @@ class Viewport3D(QWidget):
         )
 
     def _add_pv_solidify_overlay(self, name: str, verts: np.ndarray) -> None:
-        depths = aabb_depths(verts)
+        depths = self._face_thickness(name, verts)
         if len(depths) == 0:
             return
         dmax = max(float(depths.max()), 1e-9)
@@ -1364,8 +1401,13 @@ class Viewport3D(QWidget):
 
 
 
-    def set_flask(self, size_tuple: tuple[float, float]) -> None:
-        self.flask_size = size_tuple
+    def set_flask(self, size_tuple: tuple, height_in: float | None = None) -> None:
+        if len(size_tuple) >= 2:
+            self.flask_size = (float(size_tuple[0]), float(size_tuple[1]))
+        if height_in is not None:
+            self.flask_height_in = float(height_in)
+        elif len(size_tuple) >= 3:
+            self.flask_height_in = float(size_tuple[2])
         self.render(self._anim_frac)
 
 
@@ -1576,6 +1618,11 @@ class Viewport3D(QWidget):
             t = self.transforms[self.active_model]
             t["offset"] = t["offset"] + np.array([dmm_x, dmm_y, 0.0])
             self.render(self._anim_frac)
+            self.model_moved.emit({
+                "x": float(t["offset"][0]),
+                "y": float(t["offset"][1]),
+                "z": float(t["offset"][2]),
+            })
         try:
             obj.AbortFlagOn()
         except Exception:
@@ -1593,8 +1640,11 @@ class Viewport3D(QWidget):
 
         if "Tapered Sprue" in self.gating:
             sx, sy = self.sprue_offset
-            _, _, _, _, _, zmax = self._compute_bounds()
-            if self._is_near_point(mx, my, sx, sy, zmax + 50):
+            xmin, xmax, ymin, ymax, zmin, zmax = self._compute_bounds()
+            part_h = max(zmax - zmin, 1.0)
+            z_part = zmin + part_h * self.parting_z
+            _z_bot, sprue_h = self._sprue_z_and_height(z_part, zmax)
+            if self._is_near_point(mx, my, sx, sy, z_part + sprue_h * 0.5):
                 self._dragging_part = "sprue"
                 self._drag_last = (mx, my)
                 return
@@ -1661,6 +1711,11 @@ class Viewport3D(QWidget):
             off = t["offset"]
             t["offset"] = off + np.array([dmm_x, -dmm_y, 0.0])
             self.render(self._anim_frac)
+            self.model_moved.emit({
+                "x": float(t["offset"][0]),
+                "y": float(t["offset"][1]),
+                "z": float(t["offset"][2]),
+            })
 
 
 

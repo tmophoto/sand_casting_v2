@@ -93,6 +93,9 @@ def build_results_text(r: dict) -> str:
     rows.append(_section("GEOMETRY"))
     rows.append(_row("Volume",   f"{r.get('vol_cm3', 0):.2f} cm³"))
     rows.append(_row("Surface",  f"{r.get('surf_cm2', 0):.2f} cm²"))
+    mass_g = r.get("pour_mass_g")
+    if mass_g is not None:
+        rows.append(_row("Pour mass", f"{mass_g:.0f} g"))
     rows.append(_row("V/S ratio", f"{vsr:.3f} cm  ({vsr_label})", vsr_color))
     rows.append(_divider())
 

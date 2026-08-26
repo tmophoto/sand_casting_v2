@@ -11,8 +11,8 @@ from ui.demo_part import build_demo_mesh, DEMO_PART_NAME
 from viewport.viewport import Viewport3D
 from simulation.worker import SimWorker
 from results.formatter import build_results_text
-from constants import METAL_DEFAULTS, FLASK_SIZES, shrink_scale_from_slider
-from simulation.mesh_tools import scale_geometry
+from constants import METAL_DEFAULTS, FLASK_SIZES, shrink_scale_from_slider, DEFAULT_FLASK_HEIGHT_IN
+from simulation.mesh_tools import scale_geometry, local_thickness, THIN_WALL_MM
 
 
 class MainWindow(QMainWindow):
@@ -117,6 +117,14 @@ class MainWindow(QMainWindow):
         self.add_flask_btn = QPushButton("+ Custom")
         flask_layout.addWidget(self.flask_combo)
         flask_layout.addWidget(self.add_flask_btn)
+        self.flask_h_slider = QSlider(Qt.Orientation.Horizontal)
+        self.flask_h_slider.setMinimum(3)
+        self.flask_h_slider.setMaximum(18)
+        self.flask_h_slider.setValue(int(DEFAULT_FLASK_HEIGHT_IN))
+        self.flask_h_slider.setToolTip("Cope + drag stack height in inches.")
+        self.flask_h_label = QLabel(f"Flask height: {int(DEFAULT_FLASK_HEIGHT_IN)} in")
+        flask_layout.addWidget(self.flask_h_label)
+        flask_layout.addWidget(self.flask_h_slider)
         # Add container widget (not layout) to panel
         flask_panel.content_layout.addWidget(flask_container)
         left_panel.addWidget(flask_panel)
@@ -184,10 +192,10 @@ class MainWindow(QMainWindow):
         self.mold_spin.setMaximum(300)
         self.mold_spin.setValue(100)
         self.thin_combo = QComboBox()
-        self.thin_combo.addItems(["No", "Yes"])
+        self.thin_combo.addItems(["Auto", "No", "Yes"])
         self.thin_combo.setToolTip(
-            "Flag thin-walled sections (<6 mm).\n"
-            "Tightens the cold shut superheat threshold."
+            f"Auto: flag thin walls when the mesh has sections thinner than {THIN_WALL_MM:.0f} mm.\n"
+            "Yes/No override the detector. Thin walls tighten the cold-shut superheat check."
         )
         metal_layout.addWidget(QLabel("Metal:"))
         metal_layout.addWidget(self.metal_combo)
@@ -425,9 +433,7 @@ class MainWindow(QMainWindow):
 
         # Flask combo box
         self.flask_combo.currentTextChanged.connect(self._on_flask_changed)
-
-
-        # Add custom flask button
+        self.flask_h_slider.valueChanged.connect(self._on_flask_height_changed)
         self.add_flask_btn.clicked.connect(self._on_add_flask_preset)
 
 
@@ -509,6 +515,7 @@ class MainWindow(QMainWindow):
 
         # Viewport gating moved signal
         self.viewport.gating_moved.connect(self._on_gating_moved)
+        self.viewport.model_moved.connect(self._on_model_moved)
 
 
         # Initial flask setup
@@ -538,6 +545,17 @@ class MainWindow(QMainWindow):
         self.riser_x_slider.blockSignals(False)
         self.riser_y_slider.blockSignals(False)
 
+    def _on_model_moved(self, data: dict) -> None:
+        """Keep X/Y placement sliders in sync with 3D model drags."""
+        self.x_slider.blockSignals(True)
+        self.y_slider.blockSignals(True)
+        self.x_slider.setValue(int(round(data.get("x", 0))))
+        self.y_slider.setValue(int(round(data.get("y", 0))))
+        self.x_label.setText(f"X Offset: {self.x_slider.value()} mm")
+        self.y_label.setText(f"Y Offset: {self.y_slider.value()} mm")
+        self.x_slider.blockSignals(False)
+        self.y_slider.blockSignals(False)
+
     def _on_load_stl(self) -> None:
         """Handle STL file load button click."""
         filename, _ = QFileDialog.getOpenFileName(
@@ -547,7 +565,11 @@ class MainWindow(QMainWindow):
             try:
                 stats = self.viewport.load_stl(filename)
                 warn = stats.get("mesh_warnings") or []
-                extra = ("\n⚠ " + " ".join(warn)) if warn else ""
+                extra = ""
+                if warn:
+                    extra += "\n⚠ " + " ".join(warn)
+                if stats.get("thin_wall_auto"):
+                    extra += f"\nThin wall auto-detect: min section {stats.get('min_wall_mm', 0):.1f} mm"
                 self.stl_label.setText(
                     f"Loaded: {filename}\n"
                     f"Volume: {stats['vol_cm3']:.2f} cm\u00b3\n"
@@ -577,6 +599,7 @@ class MainWindow(QMainWindow):
             "render_data": triangles,
             "normals":     normals,
             "mesh":        None,
+            "thickness":   local_thickness(triangles),
         }
         self.viewport.transforms[DEMO_PART_NAME] = {
             "offset":   np.array([0.0, 0.0, 0.0]),
@@ -586,6 +609,10 @@ class MainWindow(QMainWindow):
 
         # 4. Store geometry stats for the simulation worker
         self._geometry_stats = stats
+        thick = self.viewport.models[DEMO_PART_NAME]["thickness"]
+        min_w = float(np.min(thick)) if len(thick) else 999.0
+        self._geometry_stats["min_wall_mm"] = min_w
+        self._geometry_stats["thin_wall_auto"] = min_w < THIN_WALL_MM
 
         # 5. Flask: 10 x 12 inches
         self.flask_combo.setCurrentText("10 x 12")
@@ -599,7 +626,7 @@ class MainWindow(QMainWindow):
         # 8. Mold temp: default 100 F (already set by reset)
 
         # 9. Thin wall: Yes — needed for cold-shut defect detection
-        self.thin_combo.setCurrentIndex(1)
+        self.thin_combo.setCurrentText("Yes")
 
         # 10. Parting line at 39% — bisects central body just above base plate
         self.parting_slider.setValue(39)
@@ -648,25 +675,38 @@ class MainWindow(QMainWindow):
     def _on_flask_changed(self, text: str) -> None:
         """Handle flask size combo box change."""
         size = self._flask_presets.get(text, (8, 10))
-        self.viewport.set_flask(size)
+        self.viewport.set_flask(size, height_in=self.flask_h_slider.value())
+
+    def _on_flask_height_changed(self, val: int) -> None:
+        self.flask_h_label.setText(f"Flask height: {val} in")
+        size = self._flask_presets.get(self.flask_combo.currentText(), (8, 10))
+        self.viewport.set_flask(size, height_in=val)
 
     def _on_add_flask_preset(self):
         """Add custom flask preset."""
         text, ok = QInputDialog.getText(
             self, "Add Custom Flask",
-            "Enter name, width, height (e.g., '10x12, 10, 12'):"
+            "Enter name, width, depth in inches (optional height):\n"
+            "e.g. '10x12x8, 10, 12, 8'"
         )
         if ok and text:
             try:
-                parts = text.replace(" ", "").split(",")
+                parts = [p for p in text.replace(" ", "").split(",") if p]
                 name = parts[0]
                 width = float(parts[1])
                 height = float(parts[2])
-                self._flask_presets[name] = (width, height)
+                preset = (width, height)
+                if len(parts) >= 4:
+                    self.flask_h_slider.setValue(int(round(float(parts[3]))))
+                    preset = (width, height, float(parts[3]))
+                self._flask_presets[name] = preset
                 self.flask_combo.addItem(name)
                 self.flask_combo.setCurrentText(name)
             except Exception as e:
-                QMessageBox.warning(self, "Error", "Invalid format: " + str(e))
+                QMessageBox.warning(
+                    self, "Error",
+                    "Invalid format (name, width_in, depth_in[, height_in]): " + str(e)
+                )
 
     def _on_simulate(self) -> None:
         """Run the casting simulation."""
@@ -680,11 +720,24 @@ class MainWindow(QMainWindow):
             self._geometry_stats.get("z_max", 100.0),
             scale,
         )
+        thin_mode = self.thin_combo.currentText()
+        if thin_mode == "Yes":
+            thin_wall = True
+        elif thin_mode == "No":
+            thin_wall = False
+        else:
+            if "thin_wall_auto" not in self._geometry_stats and self.viewport.models:
+                chunks = [data["render_data"] for data in self.viewport.models.values()]
+                thick = local_thickness(np.concatenate(chunks, axis=0))
+                min_w = float(np.min(thick)) if len(thick) else 999.0
+                self._geometry_stats["min_wall_mm"] = min_w
+                self._geometry_stats["thin_wall_auto"] = min_w < THIN_WALL_MM
+            thin_wall = bool(self._geometry_stats.get("thin_wall_auto"))
         params = {
             'metal': metal_name,
             'pour_temp_f': self.pour_spin.value(),
             'mold_temp_f': self.mold_spin.value(),
-            'thin_wall': self.thin_combo.currentIndex() == 1,
+            'thin_wall': thin_wall,
             'shrinkage': metal_params['shrinkage_pct'],
             'gate_types': [name for name, cb in self.gating_checkboxes.items() if cb.isChecked()],
             'vol_cm3': vol,

@@ -36,6 +36,7 @@ BASE_RESULT = {
     "restrictive_elem":   "gate",
     "defects":            [],
     "warnings":           [],
+    "pour_mass_g":        534.0,
 }
 
 
@@ -89,6 +90,9 @@ class TestFieldValues:
 
     def test_volume_two_decimals(self):
         assert "200.00" in build()
+
+    def test_pour_mass_present(self):
+        assert "534" in build()
 
     def test_surface_two_decimals(self):
         assert "180.00" in build()

@@ -72,6 +72,9 @@ FLASK_SIZES = {
     "14 x 20": (14, 20),
 }
 
+# Cope + drag stack height in inches (XY flask sizes do not include Z)
+DEFAULT_FLASK_HEIGHT_IN = 6.0
+
 # Viewport colors
 COPE_COLOR   = "#4A90D9"
 DRAG_COLOR   = "#C0834A"

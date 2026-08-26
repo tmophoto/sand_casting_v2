@@ -296,6 +296,38 @@ class TestMeshTools:
         assert q["boundary_edges"] == 0
         assert q["n_triangles"] == 12
 
+    def test_qem_decimate_reduces_count(self):
+        from simulation.mesh_tools import qem_decimate
+        many = np.concatenate(
+            [unit_cube_mesh() + np.array([i * 2.0, 0.0, 0.0]) for i in range(200)],
+            axis=0,
+        )
+        assert len(many) > 400
+        out = qem_decimate(many, max_tris=80)
+        assert len(out) <= 80
+        assert np.isfinite(out).all()
+
+    def test_qem_decimate_noop_when_small(self):
+        from simulation.mesh_tools import qem_decimate
+        cube = unit_cube_mesh()
+        out = qem_decimate(cube, max_tris=25_000)
+        assert len(out) == len(cube)
+
+    def test_invert_winding_flips_signed_volume(self):
+        from simulation.mesh_tools import inspect_mesh, invert_winding
+        cube = unit_cube_mesh()
+        flipped = invert_winding(cube)
+        assert inspect_mesh(flipped)["inverted"] != inspect_mesh(cube)["inverted"]
+        restored = invert_winding(flipped)
+        assert abs(inspect_mesh(restored)["signed_vol_mm3"] - inspect_mesh(cube)["signed_vol_mm3"]) < 1e-9
+
+    def test_local_thickness_cube_near_side_length(self):
+        from simulation.mesh_tools import local_thickness
+        cube = unit_cube_mesh() * 10.0  # 10 mm cube
+        t = local_thickness(cube)
+        assert t.min() > 1.0
+        assert t.max() < 20.0
+
     def test_cluster_decimate_reduces_count(self):
         from simulation.mesh_tools import cluster_decimate
         many = np.concatenate([unit_cube_mesh() + i * 0.01 for i in range(4000)], axis=0)

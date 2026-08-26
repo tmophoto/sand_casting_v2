@@ -37,7 +37,7 @@ in a real-time 3D viewer.
   configured; press **▶ Try Demo** then **Simulate Pour** to see the full
   simulation without loading any files
 - **STL import** with automatic mesh cleanup — degenerate triangle removal,
-  deduplication, and decimation to 25,000 triangles
+  winding repair, QEM decimation to 25,000 triangles, and thin-wall detection
 - **Real-time 3D viewer** — GPU-accelerated via PyVista/OpenGL with PBR
   materials, SSAO, and shadow rendering; software fallback via Matplotlib
 - **Multi-model scene** — load and position several STL parts simultaneously
@@ -272,12 +272,15 @@ t_solidify = B × (V / A)²
 | Symbol | Meaning |
 |---|---|
 | `t_solidify` | Solidification time (minutes) |
-| `B` | Mould constant = `3.0 × metal.mold_constant` |
+| `B` | `3.0 × mold_constant × (H / H_A356) × (k_A356 / k)` |
+| `H` | Volumetric enthalpy `ρ (c ΔT + L)` from pour through freeze |
 | `V` | Part volume (cm³) |
 | `A` | Part surface area (cm²) |
 
-The `mold_constant` scales B for different metal/mould heat-transfer
-characteristics — 1.0 for aluminium, 1.4 for bronze in a dry-sand mould.
+A356 at its catalogue pour temperature has `(H / H_A356) × (k_A356 / k) = 1`,
+so its freeze time matches the original `B = 3.0 × mold_constant` scale. Other
+alloys pick up density, specific heat, latent heat, and conductivity. Pour mass
+is `volume × density` (grams).
 
 ### Fill Time — Bernoulli Gating Hydraulics
 
@@ -547,7 +550,7 @@ sand_casting_v2/
 │
 ├── simulation/
 │   ├── worker.py               # SimWorker — physics calculations in a QThread
-│   └── mesh_tools.py           # Watertight check, clustering decimation, defect sites
+│   └── mesh_tools.py           # Watertight check, QEM decimation, local thickness
 │
 ├── viewport/
 │   └── viewport.py             # Viewport3D — 3D rendering, STL loading, animation
@@ -568,17 +571,18 @@ sand_casting_v2/
 - **Closed meshes only** — volume and surface area assume a watertight,
   consistently oriented STL. Open or inverted meshes produce wrong geometry
   values.
-- **Uniform-stride decimation** — fine detail on complex meshes may be lost.
-  Vertex clustering is used first; a stride is only applied if the clustered
-  mesh is still over 25,000 triangles.
+- **QEM decimation** — Garland–Heckbert edge collapse to 25,000 triangles;
+  grid clustering is only used if QEM cannot reach the budget.
 - **Single parting line** — simple two-part cope/drag mould only. Multi-part
   moulds and sand cores are not modelled.
 - **Isothermal fill assumption** — metal is treated as a single-temperature
   incompressible fluid. Partial solidification during fill is captured only by
-  the rule-based cold-shut warning.
-- **Fixed 100 mm sprue head** — hydraulic head is the visible sprue height plus
-  cope height (part top down to the parting line). Edit **Sprue height** in the
-  Gating System panel.
+  the rule-based cold-shut warning. The fill overlay still rises with height.
+- **Sprue head** — hydraulic head is the visible basin height plus cope height
+  (parting line up to the part top). The sprue mesh spans the parting plane to
+  the pouring basin so it meets the runner.
+- **Flask height** — XY flask presets are inches in plan; stack height is a
+  separate control (default 6 in).
 - **PyVista drag interaction** — click-drag of the sprue, riser, and model works
   in both Matplotlib and PyVista. Camera rotate still uses the default VTK
   interactor when you are not near a gating component.

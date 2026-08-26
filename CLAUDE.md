@@ -43,7 +43,7 @@ ui/
   main_window.py        # MainWindow — UI layout, signal wiring, event handlers
 simulation/
   worker.py             # SimWorker — physics calculations in a QThread
-  mesh_tools.py         # Mesh quality, clustering decimation, defect sites
+  mesh_tools.py         # Mesh quality, QEM decimation, local thickness, defect sites
 viewport/
   viewport.py           # Viewport3D — 3D rendering, STL loading, animation
 results/
@@ -83,11 +83,14 @@ ui/main_window ← casting_sim
 ## Physics
 
 - **Solidification time** — Chvorinov's Rule: `t = B × (V/A)²`
-  where `B = 3.0 × mold_constant` and V/A is the volume-to-surface-area ratio.
+  where `B = 3.0 × mold_constant × (H/H_A356) × (k_A356/k)`. `H` is volumetric
+  enthalpy from pour through freeze using density, specific heat, and latent heat.
+  A356 at its catalogue pour temperature has a thermal factor of 1.
 - **Fill time** — Bernoulli gating hydraulics using the most restrictive cross-section.
   Falls back to `max(3.0 s, volume_cm³ / 80.0)` when no gating is configured.
 - **Defect detection** — rule-based checks for misrun, cold shut, burn-on, and low
-  superheat against configurable thresholds.
+  superheat against configurable thresholds. Thin walls can be auto-detected from
+  local mesh thickness (< 6 mm).
 
 ## Metals
 
@@ -111,13 +114,16 @@ ui/main_window ← casting_sim
 
 ## STL Handling
 
-`Viewport3D.load_stl()` performs three clean-up passes before rendering:
+`Viewport3D.load_stl()` performs these clean-up passes before rendering:
 1. Remove NaN / Inf / zero-area (degenerate) triangles.
 2. Deduplicate triangles by centroid hash.
-3. Decimate to at most 25,000 triangles (uniform stride sampling).
+3. Invert face winding when signed volume is negative.
+4. Decimate to at most 25,000 triangles with Garland–Heckbert QEM (grid
+   clustering as a last-resort fallback).
 
 `_geometry_stats()` computes volume via the divergence theorem and surface area
-from cross-product magnitudes — both in one vectorised NumPy pass.
+from cross-product magnitudes — both in one vectorised NumPy pass — plus local
+wall thickness for thin-wall auto-detect.
 
 ## Running Tests
 

@@ -2,6 +2,35 @@ import math
 from PyQt6.QtCore import QObject, pyqtSignal
 from constants import METAL_DEFAULTS
 
+
+def volumetric_heat_j_cm3(metal: dict, pour_f: float) -> float:
+    """Enthalpy to extract per cm³ from pour temperature down through freeze.
+
+    ``density`` is g/cm³, ``specific_heat`` J/kg·K, ``latent_heat`` kJ/kg.
+    Superheat is converted °F → K so the stored SI properties stay consistent.
+    """
+    dT_K = max(0.0, (float(pour_f) - float(metal["melt_temp_f"])) * 5.0 / 9.0)
+    rho = float(metal["density"])
+    cp = float(metal["specific_heat"])
+    latent = float(metal["latent_heat"]) * 1000.0
+    return (rho / 1000.0) * (cp * dT_K + latent)
+
+
+def chvorinov_B(metal: dict, pour_f: float) -> float:
+    """Chvorinov prefactor (min / cm²) including mould and metal thermal properties.
+
+    ``B = 3.0 × mold_constant × (H / H_A356) × (k_A356 / k)``.
+    A356 at its default pour temperature yields a thermal factor of 1, so
+    existing aluminium timings are unchanged.
+    """
+    ref = METAL_DEFAULTS["A356 Aluminum"]
+    heat = volumetric_heat_j_cm3(metal, pour_f)
+    heat_ref = volumetric_heat_j_cm3(ref, ref["pour_temp_f"])
+    k = max(float(metal["conductivity"]), 1e-9)
+    k_ref = max(float(ref["conductivity"]), 1e-9)
+    thermal = (heat / max(heat_ref, 1e-12)) * (k_ref / k)
+    return 3.0 * float(metal["mold_constant"]) * thermal
+
 # Torricelli / Bernoulli gating constants
 _SPRUE_HEIGHT_MM = 100.0
 _DISCHARGE_CD = 0.75
@@ -85,7 +114,7 @@ class SimWorker(QObject):
         vsr = vol_cm3 / surf_cm2
 
         self.progress.emit(30, "Applying Chvorinov Rule")
-        B = 3.0 * metal["mold_constant"]
+        B = chvorinov_B(metal, pour_f)
         t_solidify_min = B * (vsr ** 2)
 
         self.progress.emit(50, "Checking defect risks")
@@ -129,9 +158,12 @@ class SimWorker(QObject):
 
         shrink_scale = p.get("shrink_scale", 1.0 + (metal["shrinkage_pct"] / 100.0))
         z_max = p.get("z_max", 100.0)
+        pour_mass_g = vol_cm3 * float(metal["density"])
 
         result = {
             "t_solidify_min": t_solidify_min,
+            "chvorinov_B": B,
+            "pour_mass_g": pour_mass_g,
             "fill_time_s": fill_time_s,
             "fill_velocity_mm_s": fill_velocity_mm_s,
             "fill_possible": fill_possible,

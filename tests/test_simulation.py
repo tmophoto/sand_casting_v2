@@ -14,7 +14,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PyQt6.QtWidgets import QApplication
-from simulation.worker import SimWorker
+from simulation.worker import SimWorker, chvorinov_B
 from constants import METAL_DEFAULTS, shrink_scale_from_slider
 
 # A QApplication instance is required for pyqtSignal to work, even headlessly
@@ -55,8 +55,9 @@ class TestChvorinovRule:
         r = run_sim(BASE_PARAMS)
         metal = METAL_DEFAULTS["A356 Aluminum"]
         vsr = 200.0 / 180.0
-        expected = 3.0 * metal["mold_constant"] * vsr ** 2
+        expected = chvorinov_B(metal, BASE_PARAMS["pour_temp_f"]) * vsr ** 2
         assert abs(r["t_solidify_min"] - expected) < 1e-9
+        assert abs(chvorinov_B(metal, 1300) - 3.0) < 1e-9
 
     def test_bronze_solidification_time(self):
         params = {**BASE_PARAMS, "metal": "Everdur Bronze (C52100)",
@@ -64,8 +65,17 @@ class TestChvorinovRule:
         r = run_sim(params)
         metal = METAL_DEFAULTS["Everdur Bronze (C52100)"]
         vsr = 200.0 / 180.0
-        expected = 3.0 * metal["mold_constant"] * vsr ** 2
+        expected = chvorinov_B(metal, 1950) * vsr ** 2
         assert abs(r["t_solidify_min"] - expected) < 1e-9
+
+    def test_pour_mass_is_volume_times_density(self):
+        r = run_sim(BASE_PARAMS)
+        assert abs(r["pour_mass_g"] - 200.0 * 2.67) < 1e-9
+
+    def test_higher_pour_increases_aluminum_B(self):
+        r_hot = run_sim({**BASE_PARAMS, "pour_temp_f": 1400})
+        r_nom = run_sim(BASE_PARAMS)
+        assert r_hot["t_solidify_min"] > r_nom["t_solidify_min"]
 
     def test_higher_vsr_means_longer_solidification(self):
         """Larger V/A ratio → longer solidification (Chvorinov's law)."""
@@ -288,7 +298,7 @@ class TestResultDict:
         "fill_possible", "cooling_rate", "restrictive_elem",
         "vsr", "vol_cm3", "surf_cm2", "superheat",
         "defects", "warnings", "metal", "pour_f", "mold_f", "shrink_scale",
-        "min_superheat_f", "z_max",
+        "min_superheat_f", "z_max", "pour_mass_g", "chvorinov_B",
     }
 
     def test_all_keys_present(self):
