@@ -43,14 +43,17 @@ ui/
   main_window.py        # MainWindow — UI layout, signal wiring, event handlers
 simulation/
   worker.py             # SimWorker — physics calculations in a QThread
+  mesh_tools.py         # Mesh quality, QEM decimation, local thickness, defect sites
+  foundry.py            # Yield, riser modulus, draft, flask fit, verdicts
+  session.py            # Save/load .cast.json and recent files
 viewport/
   viewport.py           # Viewport3D — 3D rendering, STL loading, animation
 results/
   formatter.py          # build_results_text() — formats result dict → text
 tests/
-  test_simulation.py    # SimWorker physics (headless, 30 tests)
-  test_formatter.py     # build_results_text output format (27 tests)
-  test_geometry.py      # geometry helpers and mesh generators (37 tests)
+  test_simulation.py    # SimWorker physics (headless)
+  test_formatter.py     # build_results_text output format
+  test_geometry.py      # Geometry helpers and mesh generators
 ```
 
 ### Module Summary
@@ -82,11 +85,14 @@ ui/main_window ← casting_sim
 ## Physics
 
 - **Solidification time** — Chvorinov's Rule: `t = B × (V/A)²`
-  where `B = 3.0 × mold_constant` and V/A is the volume-to-surface-area ratio.
+  where `B = 3.0 × mold_constant × (H/H_A356) × (k_A356/k) × mold_factor`.
+  `mold_factor` is 1.00 green sand, 1.15 dry sand, 0.85 resin/no-bake.
 - **Fill time** — Bernoulli gating hydraulics using the most restrictive cross-section.
   Falls back to `max(3.0 s, volume_cm³ / 80.0)` when no gating is configured.
-- **Defect detection** — rule-based checks for misrun, cold shut, burn-on, and low
-  superheat against configurable thresholds.
+- **Yield** — melt mass is part + gating metal; casting yield is part / total.
+- **Riser** — open-riser modulus must exceed 1.2 × part V/A on heavy sections.
+- **Defect detection** — misrun, cold shut, burn-on, low superheat, flask overflow,
+  plus Auto thin-wall from local mesh thickness (< 6 mm).
 
 ## Metals
 
@@ -94,6 +100,9 @@ ui/main_window ← casting_sim
 |---|---|---|---|---|
 | A356 Aluminum | 1300 | 1075 | 6 % | 1.0 |
 | Everdur Bronze (C52100) | 1950 | 1780 | 2 % | 1.4 |
+| Gray Iron (ASTM A48) | 2600 | 2200 | 1 % | 1.6 |
+| Ductile Iron (65-45-12) | 2650 | 2250 | 0.8 % | 1.6 |
+| 316 Stainless Steel | 2900 | 2550 | 2.5 % | 1.8 |
 
 ## Rendering Backends
 
@@ -107,13 +116,16 @@ ui/main_window ← casting_sim
 
 ## STL Handling
 
-`Viewport3D.load_stl()` performs three clean-up passes before rendering:
+`Viewport3D.load_stl()` performs these clean-up passes before rendering:
 1. Remove NaN / Inf / zero-area (degenerate) triangles.
 2. Deduplicate triangles by centroid hash.
-3. Decimate to at most 25,000 triangles (uniform stride sampling).
+3. Invert face winding when signed volume is negative.
+4. Decimate to at most 25,000 triangles with Garland–Heckbert QEM (grid
+   clustering as a last-resort fallback).
 
 `_geometry_stats()` computes volume via the divergence theorem and surface area
-from cross-product magnitudes — both in one vectorised NumPy pass.
+from cross-product magnitudes — both in one vectorised NumPy pass — plus local
+wall thickness for thin-wall auto-detect.
 
 ## Running Tests
 
@@ -121,21 +133,19 @@ from cross-product magnitudes — both in one vectorised NumPy pass.
 python -m pytest tests/
 ```
 
-All tests are headless (no display required). The simulation and geometry tests
+Install test extras with `pip install -r requirements-dev.txt`. All tests are
+headless (`QT_QPA_PLATFORM=offscreen`; no display required). The simulation and geometry tests
 import modules directly; only `test_simulation.py` needs a QApplication instance
 (created automatically inside the test file).
 
 ## Helper Scripts (not part of the app)
 
-The root directory contains several one-off scripts (`fix_*.py`, `part*.py`) that
-were used during incremental development. They are **not** required to run the
-application and can be safely deleted.
+The root directory previously contained one-off `fix_*.py` / `part*.py` scripts.
+Those have been deleted; they are not required to run the application.
 
 ## Git Branch
 
-Active development branch: `claude/review-optimize-functions-79Odb`
-
-Always develop on this branch; do not push directly to `master`.
+Active development happens on feature branches. Do not push directly to `master`.
 
 ## Common Tasks
 

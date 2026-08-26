@@ -2,4 +2,15 @@
 __pycache__/
 build/
 dist/
+# Ignore auto-generated specs but track our hand-crafted build specs
 *.spec
+!SandCastingSim.spec
+!SandCastingSim_GPU.spec
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+.coverage
+htmlcov/
+*.pyc
+.DS_Store

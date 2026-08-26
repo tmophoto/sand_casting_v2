@@ -121,4 +121,29 @@ QCheckBox::indicator:checked {
     background: #89B4FA;
     border-color: #89B4FA;
 }
+
+QSpinBox {
+    background-color: #1E1E2E;
+    border: 1px solid #45475A;
+    border-radius: 4px;
+    padding: 4px 8px;
+    color: #CDD6F4;
+}
+
+QListWidget {
+    background-color: #181825;
+    border: 1px solid #313244;
+    border-radius: 4px;
+    color: #CDD6F4;
+}
+
+QListWidget::item:selected { background: #313244; }
+
+QToolButton {
+    background-color: #1E1E2E;
+    border: 1px solid #45475A;
+    border-radius: 4px;
+    padding: 4px 10px;
+    color: #CDD6F4;
+}
 """

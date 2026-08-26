@@ -33,25 +33,23 @@ in a real-time 3D viewer.
 
 ## Features
 
-- **One-click demo** — pre-built Motor Mount Bracket with all settings
-  configured; press **▶ Try Demo** then **Simulate Pour** to see the full
-  simulation without loading any files
+- **One-click demo** — pre-built Motor Mount Bracket; **▶ Try Demo** lives on the top bar
 - **STL import** with automatic mesh cleanup — degenerate triangle removal,
-  deduplication, and decimation to 25,000 triangles
-- **Real-time 3D viewer** — GPU-accelerated via PyVista/OpenGL with PBR
-  materials, SSAO, and shadow rendering; software fallback via Matplotlib
-- **Multi-model scene** — load and position several STL parts simultaneously
-- **Gating system** — place tapered sprue, horizontal runner, fan gate, and open
-  riser; drag them interactively in the 3D viewport or use placement sliders
-- **Fill animation** — animated metal pour with per-triangle heat colouring and
-  a particle stream from the sprue (120 smooth steps)
-- **Solidification animation** — solidification front sweeps inward after fill
-  completes (120 smooth steps)
-- **Physics simulation** (runs in a background thread so the UI stays responsive):
-  - Solidification time via Chvorinov's Rule
-  - Fill time via Bernoulli gating hydraulics using the most-restrictive
-    cross-section
-  - Defect risk detection: misrun, cold shut, burn-on, low superheat
+  winding repair, QEM decimation to 25,000 triangles, and thin-wall detection
+- **Top-bar workflow** — Load, Simulate, Save/Open `.cast.json` sessions, recents, Undo (Ctrl+Z)
+- **Gating as a layout tool** — click a piece in 3D to edit it; snap to the part silhouette;
+  1:2:2 / 1:4:4 area-ratio presets; choke ring at the restrictive section
+- **Fill animation** — metal spreads from the gate (distance order), with a fill/solidify clock
+- **Solidification animation** — freeze order follows local wall thickness (thin first)
+- **Physics simulation** (background thread):
+  - Solidification time via Chvorinov's Rule (metal properties × mould type)
+  - Fill time via Bernoulli gating hydraulics using the most-restrictive cross-section
+  - Casting yield and melt mass including gating metal
+  - Riser modulus check vs hot-spot V/A
+  - Defect risk detection: misrun, cold shut, burn-on, low superheat, flask overflow
+- **Actionable results** — Likely OK / Risky / Will probably fail, with click-to-fly fixes
+- **Foundry checks** — draft overlay, undercut/core-print overlay, auto flask fit
+- **Pattern vs as-cast** — shrinkage scale with a toggle to preview the frozen part
 - **Defect markers** — coloured spheres rendered at risk locations after simulation
 - **Shrinkage compensation** — configurable scale factor per metal
 - **GPU array acceleration** — CuPy replaces NumPy transparently on CUDA GPUs;
@@ -95,6 +93,9 @@ cd sand_casting_v2
 
 # Install mandatory dependencies
 pip install -r requirements.txt
+
+# Optional: tests
+pip install -r requirements-dev.txt
 
 # Optional: GPU-accelerated renderer
 pip install pyvista pyvistaqt
@@ -201,8 +202,8 @@ The **Metal & Temperature** panel provides:
 
 - **Metal** drop-down — A356 Aluminum or Everdur Bronze; pour temperature and
   shrinkage defaults update automatically.
-- **Pour Temp** slider (1,000–2,500 °F) — override the metal's default pour
-  temperature.
+- **Pour Temp** slider (800–3,200 °F) — override the metal's default pour
+  temperature. The range covers aluminium through stainless steel.
 - **Mold Temp** slider (32–300 °F) — mould pre-heat temperature; values above
   120 °F trigger a burn-on warning.
 - **Thin Wall?** — flag that tightens the cold-shut superheat threshold.
@@ -269,12 +270,15 @@ t_solidify = B × (V / A)²
 | Symbol | Meaning |
 |---|---|
 | `t_solidify` | Solidification time (minutes) |
-| `B` | Mould constant = `3.0 × metal.mold_constant` |
+| `B` | `3.0 × mold_constant × (H / H_A356) × (k_A356 / k)` |
+| `H` | Volumetric enthalpy `ρ (c ΔT + L)` from pour through freeze |
 | `V` | Part volume (cm³) |
 | `A` | Part surface area (cm²) |
 
-The `mold_constant` scales B for different metal/mould heat-transfer
-characteristics — 1.0 for aluminium, 1.4 for bronze in a dry-sand mould.
+A356 at its catalogue pour temperature has `(H / H_A356) × (k_A356 / k) = 1`,
+so its freeze time matches the original `B = 3.0 × mold_constant` scale. Other
+alloys pick up density, specific heat, latent heat, and conductivity. Pour mass
+is `volume × density` (grams).
 
 ### Fill Time — Bernoulli Gating Hydraulics
 
@@ -294,13 +298,12 @@ t_fill = V / Q
 | `h` | Effective sprue head = 100 mm |
 | `A_effective` | Area of the most restrictive element (mm²) |
 
-**Restriction priority** (smallest area wins):
+**Restriction priority** — among every enabled component, the smallest area wins:
 
-1. Sprue + gate present → compare sprue exit vs gate area
-2. Sprue + runner present → compare sprue exit vs runner area
-3. Sprue only → use sprue exit area
-4. Gate only → use gate area
-5. No gating → fallback: `max(3.0 s, volume_cm³ / 80.0)`
+1. Tapered sprue → exit (bottom) area
+2. Horizontal runner → rectangular width × height (10 × 8 mm)
+3. Fan gate → hydraulic area (default 40 mm²)
+4. No gating → fallback: `max(3.0 s, volume_cm³ / 80.0)`
 
 Fill time is clamped to a minimum of 1.5 s.
 
@@ -323,6 +326,9 @@ Fill time is clamped to a minimum of 1.5 s.
 |---|---|---|---|---|---|
 | A356 Aluminum | 1,300 | 1,075 | 2.67 g/cm³ | 6 % | 1.0 |
 | Everdur Bronze (C52100) | 1,950 | 1,780 | 8.8 g/cm³ | 2 % | 1.4 |
+| Gray Iron (ASTM A48) | 2,600 | 2,200 | 7.15 g/cm³ | 1 % | 1.6 |
+| Ductile Iron (65-45-12) | 2,650 | 2,250 | 7.1 g/cm³ | 0.8 % | 1.6 |
+| 316 Stainless Steel | 2,900 | 2,550 | 7.99 g/cm³ | 2.5 % | 1.8 |
 
 See [Adding a New Metal](#adding-a-new-metal) to extend this list.
 
@@ -443,16 +449,17 @@ iterates over `METAL_DEFAULTS` to populate the combo box.
 ## Running Tests
 
 ```bash
+pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-All tests are headless (no display required).
+All tests are headless (`QT_QPA_PLATFORM=offscreen`; no display required).
 
 | Test file | Coverage |
 |---|---|
-| `tests/test_simulation.py` | SimWorker physics — 30 tests |
-| `tests/test_formatter.py` | `build_results_text()` output format — 27 tests |
-| `tests/test_geometry.py` | Geometry helpers and mesh generators — 37 tests |
+| `tests/test_simulation.py` | SimWorker physics |
+| `tests/test_formatter.py` | `build_results_text()` output format |
+| `tests/test_geometry.py` | Geometry helpers and mesh generators |
 
 ---
 
@@ -506,13 +513,15 @@ pip install pyinstaller
 build_exe.bat
 ```
 
-Output: `dist/SandCastingSim.exe`.
+Output: `dist/SandCastingSim/SandCastingSim.exe` (folder build — zip the whole folder).
 
-To build manually:
+GPU / PyVista build (much larger, includes VTK):
 
 ```bat
-pyinstaller --onefile --windowed --name SandCastingSim casting_sim.py
+build_gpu.bat
 ```
+
+Output: `dist/SandCastingSim_GPU/SandCastingSim.exe`.
 
 ---
 
@@ -526,7 +535,10 @@ sand_casting_v2/
 ├── README.md                   # This file
 ├── CLAUDE.md                   # Developer guide for Claude Code sessions
 ├── run.bat                     # Windows launcher (auto-installs deps)
-├── build_exe.bat               # PyInstaller build script (run on Windows)
+├── build_exe.bat               # PyInstaller CPU/folder build (run on Windows)
+├── build_gpu.bat               # PyInstaller PyVista/VTK GPU build (run on Windows)
+├── SandCastingSim.spec
+├── SandCastingSim_GPU.spec
 │
 ├── ui/
 │   ├── style.py                # APP_STYLE QSS (Catppuccin Mocha dark theme)
@@ -535,7 +547,8 @@ sand_casting_v2/
 │   └── demo_part.py            # build_demo_mesh() — procedural Motor Mount Bracket
 │
 ├── simulation/
-│   └── worker.py               # SimWorker — physics calculations in a QThread
+│   ├── worker.py               # SimWorker — physics calculations in a QThread
+│   └── mesh_tools.py           # Watertight check, QEM decimation, local thickness
 │
 ├── viewport/
 │   └── viewport.py             # Viewport3D — 3D rendering, STL loading, animation
@@ -556,18 +569,21 @@ sand_casting_v2/
 - **Closed meshes only** — volume and surface area assume a watertight,
   consistently oriented STL. Open or inverted meshes produce wrong geometry
   values.
-- **Uniform-stride decimation** — fine detail on complex meshes may be lost.
-  No edge-collapse or QEM simplification is implemented.
+- **QEM decimation** — Garland–Heckbert edge collapse to 25,000 triangles;
+  grid clustering is only used if QEM cannot reach the budget.
 - **Single parting line** — simple two-part cope/drag mould only. Multi-part
   moulds and sand cores are not modelled.
 - **Isothermal fill assumption** — metal is treated as a single-temperature
   incompressible fluid. Partial solidification during fill is captured only by
-  the rule-based cold-shut warning.
-- **Fixed 100 mm sprue head** — the Bernoulli calculation uses a hard-coded
-  sprue height. Adjust `sprue_height_mm` in `_compute_fill_time_gating_hydraulics`
-  for very tall or short sprues.
-- **PyVista drag interaction** — interactive click-drag of gating components is
-  Matplotlib-only. In PyVista mode, use the Gating Placement sliders.
+  the rule-based cold-shut warning. The fill overlay still rises with height.
+- **Sprue head** — hydraulic head is the visible basin height plus cope height
+  (parting line up to the part top). The sprue mesh spans the parting plane to
+  the pouring basin so it meets the runner.
+- **Flask height** — XY flask presets are inches in plan; stack height is a
+  separate control (default 6 in).
+- **PyVista drag interaction** — click-drag of the sprue, riser, and model works
+  in both Matplotlib and PyVista. Camera rotate still uses the default VTK
+  interactor when you are not near a gating component.
 
 ---
 

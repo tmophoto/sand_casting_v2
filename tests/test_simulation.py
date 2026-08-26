@@ -14,8 +14,8 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PyQt6.QtWidgets import QApplication
-from simulation.worker import SimWorker
-from constants import METAL_DEFAULTS
+from simulation.worker import SimWorker, chvorinov_B
+from constants import METAL_DEFAULTS, shrink_scale_from_slider
 
 # A QApplication instance is required for pyqtSignal to work, even headlessly
 _app = QApplication.instance() or QApplication(sys.argv)
@@ -55,8 +55,9 @@ class TestChvorinovRule:
         r = run_sim(BASE_PARAMS)
         metal = METAL_DEFAULTS["A356 Aluminum"]
         vsr = 200.0 / 180.0
-        expected = 3.0 * metal["mold_constant"] * vsr ** 2
+        expected = chvorinov_B(metal, BASE_PARAMS["pour_temp_f"]) * vsr ** 2
         assert abs(r["t_solidify_min"] - expected) < 1e-9
+        assert abs(chvorinov_B(metal, 1300) - 3.0) < 1e-9
 
     def test_bronze_solidification_time(self):
         params = {**BASE_PARAMS, "metal": "Everdur Bronze (C52100)",
@@ -64,8 +65,17 @@ class TestChvorinovRule:
         r = run_sim(params)
         metal = METAL_DEFAULTS["Everdur Bronze (C52100)"]
         vsr = 200.0 / 180.0
-        expected = 3.0 * metal["mold_constant"] * vsr ** 2
+        expected = chvorinov_B(metal, 1950) * vsr ** 2
         assert abs(r["t_solidify_min"] - expected) < 1e-9
+
+    def test_pour_mass_is_volume_times_density(self):
+        r = run_sim(BASE_PARAMS)
+        assert abs(r["pour_mass_g"] - 200.0 * 2.67) < 1e-9
+
+    def test_higher_pour_increases_aluminum_B(self):
+        r_hot = run_sim({**BASE_PARAMS, "pour_temp_f": 1400})
+        r_nom = run_sim(BASE_PARAMS)
+        assert r_hot["t_solidify_min"] > r_nom["t_solidify_min"]
 
     def test_higher_vsr_means_longer_solidification(self):
         """Larger V/A ratio → longer solidification (Chvorinov's law)."""
@@ -148,6 +158,40 @@ class TestFillTimeHydraulics:
         """Fallback fill time is clamped to ≥ 3.0 s."""
         r = run_sim({**BASE_PARAMS, "vol_cm3": 0.01, "gating_params": {}})
         assert r["fill_time_s"] >= 3.0
+
+    def test_sprue_fill_time_matches_torricelli(self):
+        """Fill time and velocity share a single Cd × √(2gh) calculation."""
+        gating = {"has_sprue": True, "sprue_top_r": 7.5, "sprue_bot_r": 4.0}
+        r = run_sim({**BASE_PARAMS, "gating_params": gating})
+        cd, g, h = 0.75, 9806.65, 100.0
+        v_mm_s = cd * math.sqrt(2.0 * g * h)
+        area_mm2 = math.pi * 4.0 ** 2
+        q_cm3_s = (area_mm2 * v_mm_s) / 1000.0
+        expected = max(1.5, 200.0 / q_cm3_s)
+        assert abs(r["fill_time_s"] - expected) < 1e-9
+        assert abs(r["fill_velocity_mm_s"] - v_mm_s) < 1e-9
+        assert r["fill_time_s"] > 1.5  # must not be stuck on the 1.5 s clamp
+
+    def test_rectangular_runner_uses_width_times_height(self):
+        """A tiny rectangular runner is more restrictive than a 4 mm sprue exit."""
+        gating = {
+            "has_sprue": True, "has_runner": True,
+            "sprue_top_r": 7.5, "sprue_bot_r": 4.0,
+            "runner_width_mm": 2.0, "runner_height_mm": 2.0,
+        }
+        r = run_sim({**BASE_PARAMS, "gating_params": gating})
+        assert r["restrictive_elem"] == "runner"
+
+    def test_all_gating_elements_compared(self):
+        """Sprue + runner + gate: the smallest area wins, even if it is the runner."""
+        gating = {
+            "has_sprue": True, "has_runner": True, "has_gate": True,
+            "sprue_top_r": 20.0, "sprue_bot_r": 20.0,
+            "runner_width_mm": 2.0, "runner_height_mm": 2.0,
+            "gate_area_mm2": 400.0,
+        }
+        r = run_sim({**BASE_PARAMS, "gating_params": gating})
+        assert r["restrictive_elem"] == "runner"
 
     def test_larger_volume_takes_longer_to_fill(self):
         gating = {"has_sprue": True, "sprue_top_r": 7.5, "sprue_bot_r": 4.0}
@@ -236,6 +280,12 @@ class TestShrinkageScale:
         expected = 1.0 + metal["shrinkage_pct"] / 100.0
         assert abs(r["shrink_scale"] - expected) < 1e-9
 
+    def test_slider_scale_matches_percent(self):
+        """Slider 106 → ×1.06, not ×1.006."""
+        assert abs(shrink_scale_from_slider(100) - 1.00) < 1e-12
+        assert abs(shrink_scale_from_slider(106) - 1.06) < 1e-12
+        assert abs(shrink_scale_from_slider(110) - 1.10) < 1e-12
+
 
 # ---------------------------------------------------------------------------
 # Result dict completeness
@@ -248,6 +298,8 @@ class TestResultDict:
         "fill_possible", "cooling_rate", "restrictive_elem",
         "vsr", "vol_cm3", "surf_cm2", "superheat",
         "defects", "warnings", "metal", "pour_f", "mold_f", "shrink_scale",
+        "min_superheat_f", "z_max", "pour_mass_g", "chvorinov_B",
+        "verdict", "fixes", "yield_pct", "mold_type",
     }
 
     def test_all_keys_present(self):
@@ -257,6 +309,10 @@ class TestResultDict:
     def test_metal_name_echoed(self):
         r = run_sim(BASE_PARAMS)
         assert r["metal"] == "A356 Aluminum"
+
+    def test_z_max_echoed_from_params(self):
+        r = run_sim({**BASE_PARAMS, "z_max": 102.0})
+        assert r["z_max"] == 102.0
 
     def test_pour_and_mold_temps_echoed(self):
         r = run_sim(BASE_PARAMS)
@@ -326,3 +382,11 @@ class TestRobustness:
         heavy = {**BASE_PARAMS, "vol_cm3": 2000.0, "surf_cm2": 600.0, "has_riser": False}
         r = run_sim(heavy)
         assert any("porosity" in w.lower() for w in r["warnings"])
+
+    def test_taller_sprue_head_increases_velocity(self):
+        gating = {"has_sprue": True, "sprue_top_r": 7.5, "sprue_bot_r": 4.0,
+                  "sprue_height_mm": 100.0}
+        r_low = run_sim({**BASE_PARAMS, "gating_params": gating})
+        r_hi = run_sim({**BASE_PARAMS, "gating_params": {**gating, "sprue_height_mm": 400.0}})
+        assert r_hi["fill_velocity_mm_s"] > r_low["fill_velocity_mm_s"]
+        assert r_hi["fill_time_s"] < r_low["fill_time_s"]

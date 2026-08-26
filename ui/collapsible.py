@@ -15,7 +15,7 @@ class CollapsiblePanel(QFrame):
         title_bar = QHBoxLayout()
         self.title_label = QLabel(title)
         self.title_label.setStyleSheet("font-weight: bold; color: #89B4FA;")
-        self.toggle_btn = QPushButton("\u25BC")  # Down arrow
+        self.toggle_btn = QPushButton("\u25B6")  # Right arrow — starts collapsed
         self.toggle_btn.setFixedWidth(20)
         self.toggle_btn.setStyleSheet("""
             QPushButton {

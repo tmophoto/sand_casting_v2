@@ -72,6 +72,24 @@ FLASK_SIZES = {
     "14 x 20": (14, 20),
 }
 
+# Cope + drag stack height in inches (XY flask sizes do not include Z)
+DEFAULT_FLASK_HEIGHT_IN = 6.0
+
+# Mould material multiplier on Chvorinov B (green sand = 1)
+MOLD_TYPES = {
+    "Green sand": 1.00,
+    "Dry sand": 1.15,
+    "Resin / no-bake": 0.85,
+}
+
+# Sprue : runner : gate area ratios
+GATING_RATIOS = {
+    "1 : 2 : 2 (non-ferrous)": (1.0, 2.0, 2.0),
+    "1 : 4 : 4 (ferrous)": (1.0, 4.0, 4.0),
+}
+
+DRAFT_MIN_DEG = 1.5
+
 # Viewport colors
 COPE_COLOR   = "#4A90D9"
 DRAG_COLOR   = "#C0834A"
@@ -113,3 +131,8 @@ METAL_PBR = {
         "roughness": 0.15,
     },
 }
+
+
+def shrink_scale_from_slider(slider_value: int) -> float:
+    """Map the 100–110 shrinkage slider onto a linear scale factor (1.00–1.10)."""
+    return slider_value / 100.0

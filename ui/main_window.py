@@ -1,9 +1,13 @@
+from pathlib import Path
+
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QSplitter, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QComboBox, QSlider, QCheckBox, QTextEdit, QScrollArea,
-    QProgressBar, QFileDialog, QInputDialog, QMessageBox
+    QPushButton, QComboBox, QSlider, QCheckBox, QScrollArea,
+    QProgressBar, QFileDialog, QInputDialog, QMessageBox, QSpinBox,
+    QListWidget, QListWidgetItem, QTextBrowser,
 )
-from PyQt6.QtCore import Qt, QThread
+from PyQt6.QtCore import Qt, QThread, QUrl, QShortcut
+from PyQt6.QtGui import QKeySequence
 import numpy as np
 from ui.style import APP_STYLE
 from ui.collapsible import CollapsiblePanel
@@ -11,596 +15,939 @@ from ui.demo_part import build_demo_mesh, DEMO_PART_NAME
 from viewport.viewport import Viewport3D
 from simulation.worker import SimWorker
 from results.formatter import build_results_text
-from constants import METAL_DEFAULTS, FLASK_SIZES
+from constants import (
+    METAL_DEFAULTS, FLASK_SIZES, shrink_scale_from_slider, DEFAULT_FLASK_HEIGHT_IN,
+    MOLD_TYPES, GATING_RATIOS,
+)
+from simulation.mesh_tools import scale_geometry, local_thickness, THIN_WALL_MM
+from simulation.foundry import (
+    apply_gating_ratio, flask_fit, recommended_pour_band, draft_analysis,
+    undercut_hints,
+)
+from simulation.session import (
+    save_session, load_session, recent_projects, remember_project, default_session,
+)
 
 
 class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Sand Casting Simulator v1.0")
-        self.resize(1400, 900)
+        self.setWindowTitle("Sand Casting Simulator")
+        self.resize(1480, 920)
         self.setStyleSheet(APP_STYLE)
-
 
         self._geometry_stats = {"vol_cm3": 100.0, "surf_cm2": 120.0}
         self._sim_thread = None
         self._sim_worker = None
         self._last_result = None
-
+        self._stl_path = None
+        self._is_demo = False
+        self._undo_stack: list[dict] = []
+        self._session_path = None
 
         self.viewport = Viewport3D()
         self._build_ui()
         self._wire_signals()
+        self._refresh_recents()
 
-
+    # ------------------------------------------------------------------
+    # Layout
+    # ------------------------------------------------------------------
 
     def _build_ui(self):
-        main_layout = QHBoxLayout()
-        main_widget = QWidget()
-        main_widget.setLayout(main_layout)
-        self.setCentralWidget(main_widget)
+        shell = QWidget()
+        self.setCentralWidget(shell)
+        outer = QVBoxLayout(shell)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(6)
 
+        outer.addLayout(self._build_top_bar())
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        main_layout.addWidget(splitter)
+        outer.addWidget(splitter)
 
-
-        left_panel = QVBoxLayout()
         left_widget = QWidget()
-        left_widget.setLayout(left_panel)
-        left_panel.setContentsMargins(10, 10, 10, 10)
+        left_panel = QVBoxLayout(left_widget)
+        left_panel.setContentsMargins(4, 4, 4, 4)
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setWidget(left_widget)
-        left_scroll.setMinimumWidth(320)
+        left_scroll.setMinimumWidth(300)
         splitter.addWidget(left_scroll)
 
+        self._build_part_panel(left_panel)
+        self._build_gating_panel(left_panel)
+        self._build_metal_panel(left_panel)
+        self._build_flask_panel(left_panel)
+        self._build_parting_panel(left_panel)
+        self._build_placement_panel(left_panel)
+        self._build_shrink_panel(left_panel)
+        self._build_inspect_panel(left_panel)
+        left_panel.addStretch()
 
-        stl_panel = CollapsiblePanel("STL File")
-        # Create container widget for proper parent-child ownership
-        stl_container = QWidget()
-        stl_layout = QVBoxLayout()
-        stl_container.setLayout(stl_layout)
-        self.load_btn = QPushButton("Load STL...")
-        self.demo_btn = QPushButton("▶ Try Demo")
-        self.demo_btn.setToolTip(
-            "Load a pre-built Motor Mount Bracket with all settings pre-configured.\n"
-            "Press Simulate Pour to see fill animation and defect analysis."
-        )
-        self.demo_btn.setStyleSheet(
-            "QPushButton { background-color: #A6E3A1; color: black; font-weight: bold; padding: 6px; }"
-        )
-        self.stl_label = QLabel("No file loaded")
-        self.stl_label.setWordWrap(True)
-        stl_layout.addWidget(self.load_btn)
-        stl_layout.addWidget(self.demo_btn)
-        stl_layout.addWidget(self.stl_label)
-        # Add container widget (not layout) to panel
-        stl_panel.content_layout.addWidget(stl_container)
-        left_panel.addWidget(stl_panel)
-        stl_panel.setExpanded(True)
-
-
-        parting_panel = CollapsiblePanel("Parting Line")
-        # Create container widget for proper parent-child ownership
-        parting_container = QWidget()
-        parting_layout = QVBoxLayout()
-        parting_container.setLayout(parting_layout)
-        self.parting_slider = QSlider(Qt.Orientation.Horizontal)
-        self.parting_slider.setMinimum(5)
-        self.parting_slider.setMaximum(95)
-        self.parting_slider.setValue(50)
-        self.parting_slider.setToolTip(
-            "Where the mold splits into cope (top) and drag (bottom),\n"
-            "expressed as % of part height."
-        )
-        label = QLabel("Position: 50%")
-        parting_layout.addWidget(label)
-        parting_layout.addWidget(self.parting_slider)
-        # Add container widget (not layout) to panel
-        parting_panel.content_layout.addWidget(parting_container)
-        left_panel.addWidget(parting_panel)
-        parting_panel.setExpanded(True)
-
-
-        flask_panel = CollapsiblePanel("Flask Size")
-        # Create container widget for proper parent-child ownership
-        flask_container = QWidget()
-        flask_layout = QVBoxLayout()
-        flask_container.setLayout(flask_layout)
-        self.flask_combo = QComboBox()
-        self._flask_presets = dict(FLASK_SIZES)  # mutable copy; grows with custom presets
-        for name in self._flask_presets:
-            self.flask_combo.addItem(name)
-        self.add_flask_btn = QPushButton("+ Custom")
-        flask_layout.addWidget(self.flask_combo)
-        flask_layout.addWidget(self.add_flask_btn)
-        # Add container widget (not layout) to panel
-        flask_panel.content_layout.addWidget(flask_container)
-        left_panel.addWidget(flask_panel)
-        flask_panel.setExpanded(True)
-
-
-        gating_panel = CollapsiblePanel("Gating System")
-        # Create container widget for proper parent-child ownership
-        gating_container = QWidget()
-        gating_layout = QVBoxLayout()
-        gating_container.setLayout(gating_layout)
-        self.gating_checkboxes = {}
-        for comp in ["Tapered Sprue", "Runner (Horizontal)", "Fan Gate",
-                     "Riser (Open)"]:
-            cb = QCheckBox(comp)
-            self.gating_checkboxes[comp] = cb
-            gating_layout.addWidget(cb)
-        # Add container widget (not layout) to panel
-        gating_panel.content_layout.addWidget(gating_container)
-        left_panel.addWidget(gating_panel)
-        gating_panel.setExpanded(True)
-
-
-        metal_panel = CollapsiblePanel("Metal & Temperature")
-        # Create container widget for proper parent-child ownership
-        metal_container = QWidget()
-        metal_layout = QVBoxLayout()
-        metal_container.setLayout(metal_layout)
-        self.metal_combo = QComboBox()
-        for metal in METAL_DEFAULTS:
-            self.metal_combo.addItem(metal)
-        self.pour_spin = QSlider(Qt.Orientation.Horizontal)
-        self.pour_spin.setMinimum(1000)
-        self.pour_spin.setMaximum(2500)
-        self.pour_spin.setValue(METAL_DEFAULTS["A356 Aluminum"]["pour_temp_f"])
-        self.mold_spin = QSlider(Qt.Orientation.Horizontal)
-        self.mold_spin.setMinimum(32)
-        self.mold_spin.setMaximum(300)
-        self.mold_spin.setValue(100)
-        self.thin_combo = QComboBox()
-        self.thin_combo.addItems(["No", "Yes"])
-        self.thin_combo.setToolTip(
-            "Flag thin-walled sections (<6 mm).\n"
-            "Tightens the cold shut superheat threshold."
-        )
-        metal_layout.addWidget(QLabel("Metal:"))
-        metal_layout.addWidget(self.metal_combo)
-        self.pour_temp_label = QLabel(f"Pour Temp: {METAL_DEFAULTS['A356 Aluminum']['pour_temp_f']} °F")
-        metal_layout.addWidget(self.pour_temp_label)
-        metal_layout.addWidget(self.pour_spin)
-        self.mold_temp_label = QLabel("Mold Temp: 100 °F")
-        metal_layout.addWidget(self.mold_temp_label)
-        metal_layout.addWidget(self.mold_spin)
-        metal_layout.addWidget(QLabel("Thin Wall?"))
-        metal_layout.addWidget(self.thin_combo)
-        # Add container widget (not layout) to panel
-        metal_panel.content_layout.addWidget(metal_container)
-        left_panel.addWidget(metal_panel)
-        metal_panel.setExpanded(True)
-
-
-        placement_panel = CollapsiblePanel("Model Placement")
-        # Create container widget for proper parent-child ownership
-        placement_container = QWidget()
-        placement_layout = QVBoxLayout()
-        placement_container.setLayout(placement_layout)
-        self.x_slider = QSlider(Qt.Orientation.Horizontal)
-        self.x_slider.setMinimum(-500)
-        self.x_slider.setMaximum(500)
-        self.x_slider.setValue(0)
-        self.y_slider = QSlider(Qt.Orientation.Horizontal)
-        self.y_slider.setMinimum(-500)
-        self.y_slider.setMaximum(500)
-        self.y_slider.setValue(0)
-        self.z_slider = QSlider(Qt.Orientation.Horizontal)
-        self.z_slider.setMinimum(-200)
-        self.z_slider.setMaximum(200)
-        self.z_slider.setValue(0)
-        self.rot_slider = QSlider(Qt.Orientation.Horizontal)
-        self.rot_slider.setMinimum(0)
-        self.rot_slider.setMaximum(360)
-        self.rot_slider.setValue(0)
-        placement_layout.addWidget(QLabel("X Offset: 0 mm"))
-        placement_layout.addWidget(self.x_slider)
-        placement_layout.addWidget(QLabel("Y Offset: 0 mm"))
-        placement_layout.addWidget(self.y_slider)
-        placement_layout.addWidget(QLabel("Z Offset: 0 mm"))
-        placement_layout.addWidget(self.z_slider)
-        placement_layout.addWidget(QLabel("Rotation: 0 deg"))
-        placement_layout.addWidget(self.rot_slider)
-        # Add container widget (not layout) to panel
-        placement_panel.content_layout.addWidget(placement_container)
-        left_panel.addWidget(placement_panel)
-        placement_panel.setExpanded(True)
-
-
-        gating_placement_panel = CollapsiblePanel("Gating Placement")
-        # Create container widget for proper parent-child ownership
-        gating_placement_container = QWidget()
-        gating_placement_layout = QVBoxLayout()
-        gating_placement_container.setLayout(gating_placement_layout)
-        self.sprue_x_slider = QSlider(Qt.Orientation.Horizontal)
-        self.sprue_x_slider.setMinimum(-200)
-        self.sprue_x_slider.setMaximum(200)
-        self.sprue_x_slider.setValue(0)
-        self.sprue_x_slider.setToolTip("Sprue X position relative to part centre (mm)")
-        self.sprue_y_slider = QSlider(Qt.Orientation.Horizontal)
-        self.sprue_y_slider.setMinimum(-200)
-        self.sprue_y_slider.setMaximum(200)
-        self.sprue_y_slider.setValue(0)
-        self.sprue_y_slider.setToolTip("Sprue Y position relative to part centre (mm)")
-        self.riser_x_slider = QSlider(Qt.Orientation.Horizontal)
-        self.riser_x_slider.setMinimum(-200)
-        self.riser_x_slider.setMaximum(200)
-        self.riser_x_slider.setValue(0)
-        self.riser_x_slider.setToolTip("Riser X position relative to part centre (mm)")
-        self.riser_y_slider = QSlider(Qt.Orientation.Horizontal)
-        self.riser_y_slider.setMinimum(-200)
-        self.riser_y_slider.setMaximum(200)
-        self.riser_y_slider.setValue(0)
-        self.riser_y_slider.setToolTip("Riser Y position relative to part centre (mm)")
-        gating_placement_layout.addWidget(QLabel("Sprue X: 0 mm"))
-        gating_placement_layout.addWidget(self.sprue_x_slider)
-        gating_placement_layout.addWidget(QLabel("Sprue Y: 0 mm"))
-        gating_placement_layout.addWidget(self.sprue_y_slider)
-        gating_placement_layout.addWidget(QLabel("Riser X: 0 mm"))
-        gating_placement_layout.addWidget(self.riser_x_slider)
-        gating_placement_layout.addWidget(QLabel("Riser Y: 0 mm"))
-        gating_placement_layout.addWidget(self.riser_y_slider)
-        # Add container widget (not layout) to panel
-        gating_placement_panel.content_layout.addWidget(gating_placement_container)
-        left_panel.addWidget(gating_placement_panel)
-        gating_placement_panel.setExpanded(True)
-
-
-        shrink_panel = CollapsiblePanel("Shrinkage Compensation")
-        # Create container widget for proper parent-child ownership
-        shrink_container = QWidget()
-        shrink_layout = QVBoxLayout()
-        shrink_container.setLayout(shrink_layout)
-        self.shrink_slider = QSlider(Qt.Orientation.Horizontal)
-        self.shrink_slider.setMinimum(100)
-        self.shrink_slider.setMaximum(110)
-        self.shrink_slider.setValue(106)
-        self.shrink_slider.setToolTip(
-            "Scale the pattern slightly larger to compensate for metal shrinkage.\n"
-            "The slider adds 0–10 % to part dimensions."
-        )
-        shrink_pct = METAL_DEFAULTS["A356 Aluminum"]["shrinkage_pct"]
-        scale_val = 1.0 + (106 - 100) / 1000.0
-        self.shrink_label = QLabel(f"Shrinkage: {shrink_pct}%  ·  scale ×{scale_val:.3f}")
-        shrink_layout.addWidget(self.shrink_label)
-        shrink_layout.addWidget(self.shrink_slider)
-        # Add container widget (not layout) to panel
-        shrink_panel.content_layout.addWidget(shrink_container)
-        left_panel.addWidget(shrink_panel)
-        shrink_panel.setExpanded(True)
-
-
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        left_panel.addWidget(self.progress_bar)
-
-
-        center_panel = QVBoxLayout()
-        center_widget = QWidget()
-        center_widget.setLayout(center_panel)
-        center_panel.setContentsMargins(10, 10, 10, 10)
-        view_label = QLabel("3D Part Viewer")
-        view_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        center_panel.addWidget(view_label)
-        self.render_frame = self.viewport
+        center = QWidget()
+        center_l = QVBoxLayout(center)
+        center_l.setContentsMargins(4, 4, 4, 4)
         if hasattr(self.viewport, "render_frame"):
-            center_panel.addWidget(self.viewport.render_frame)
+            center_l.addWidget(self.viewport.render_frame)
         else:
-            center_panel.addWidget(self.viewport)
-        splitter.addWidget(center_widget)
+            center_l.addWidget(self.viewport)
+        splitter.addWidget(center)
 
-
-        # Create top-right panel for view buttons (small, horizontal)
-        view_btn_layout = QHBoxLayout()
-        view_btn_layout.setSpacing(5)
+        right = QWidget()
+        right_l = QVBoxLayout(right)
+        right_l.setContentsMargins(8, 4, 8, 4)
+        views = QHBoxLayout()
         for view in ["Top", "Bottom", "Front", "Back", "Left", "Right", "Iso"]:
             btn = QPushButton(view)
             btn.clicked.connect(lambda _, v=view: self.viewport.set_view(v))
             btn.setStyleSheet("QPushButton { padding: 4px 8px; font-size: 9px; }")
-            view_btn_layout.addWidget(btn)
-        right_panel = QVBoxLayout()
-        right_widget = QWidget()
-        right_widget.setLayout(right_panel)
-        right_panel.setContentsMargins(10, 10, 10, 10)
-        # Add view buttons at the top of right panel
-        right_panel.addLayout(view_btn_layout)
-        result_label = QLabel("Simulation Results")
-        result_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        right_panel.addWidget(result_label)
-        self.results_text = QTextEdit()
-        self.results_text.setReadOnly(True)
-        self.results_text.setAcceptRichText(True)
-        self.results_text.setMinimumWidth(350)
-        right_panel.addWidget(self.results_text)
+            views.addWidget(btn)
+        right_l.addLayout(views)
+        right_l.addWidget(QLabel("Simulation Results"))
+        self.results_text = QTextBrowser()
+        self.results_text.setOpenExternalLinks(False)
+        self.results_text.setOpenLinks(False)
+        self.results_text.setMinimumWidth(340)
+        right_l.addWidget(self.results_text)
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 0)
+
+        self._main_layout = outer
+
+    def _build_top_bar(self) -> QHBoxLayout:
+        bar = QHBoxLayout()
+        self.demo_btn = QPushButton("▶ Try Demo")
+        self.demo_btn.setToolTip("Load the Motor Mount Bracket with a full gating setup.")
+        self.demo_btn.setStyleSheet(
+            "QPushButton { background-color: #A6E3A1; color: black; font-weight: bold; padding: 6px 12px; }"
+        )
+        self.load_btn = QPushButton("Load STL…")
         self.sim_btn = QPushButton("Simulate Pour")
         self.sim_btn.setObjectName("sim_btn")
         self.reset_btn = QPushButton("Reset")
         self.reset_btn.setObjectName("reset_btn")
-        btn_layout = QHBoxLayout()
-        btn_layout.addWidget(self.sim_btn)
-        btn_layout.addWidget(self.reset_btn)
-        right_panel.addLayout(btn_layout)
-        splitter.addWidget(right_widget)
+        self.save_btn = QPushButton("Save")
+        self.open_btn = QPushButton("Open")
+        self.export_btn = QPushButton("Export…")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setMaximumWidth(220)
+        for w in (self.demo_btn, self.load_btn, self.sim_btn, self.reset_btn,
+                  self.save_btn, self.open_btn, self.export_btn):
+            bar.addWidget(w)
+        bar.addStretch()
+        bar.addWidget(self.progress_bar)
+        return bar
 
+    def _build_part_panel(self, parent):
+        panel = CollapsiblePanel("Part")
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        self.stl_label = QLabel("No file loaded — try the demo or load an STL.")
+        self.stl_label.setWordWrap(True)
+        lay.addWidget(self.stl_label)
+        lay.addWidget(QLabel("Recent"))
+        self.recent_list = QListWidget()
+        self.recent_list.setMaximumHeight(90)
+        lay.addWidget(self.recent_list)
+        panel.content_layout.addWidget(box)
+        parent.addWidget(panel)
+        panel.setExpanded(True)
+        self._part_panel = panel
 
+    def _build_gating_panel(self, parent):
+        panel = CollapsiblePanel("Gating")
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        self.gating_checkboxes = {}
+        for comp in ["Tapered Sprue", "Runner (Horizontal)", "Fan Gate", "Riser (Open)"]:
+            cb = QCheckBox(comp)
+            self.gating_checkboxes[comp] = cb
+            lay.addWidget(cb)
+        lay.addWidget(QLabel("Ratio preset"))
+        self.ratio_combo = QComboBox()
+        for name in GATING_RATIOS:
+            self.ratio_combo.addItem(name)
+        self.apply_ratio_btn = QPushButton("Apply ratio")
+        self.snap_btn = QPushButton("Snap to part")
+        row = QHBoxLayout()
+        row.addWidget(self.apply_ratio_btn)
+        row.addWidget(self.snap_btn)
+        lay.addWidget(self.ratio_combo)
+        lay.addLayout(row)
+        self.gating_hint = QLabel("Click a gating piece in 3D to edit its size.")
+        self.gating_hint.setWordWrap(True)
+        self.gating_hint.setStyleSheet("color: #A6ADC8;")
+        lay.addWidget(self.gating_hint)
 
+        self.sprue_dim_box, self.sprue_top_slider, self.sprue_top_label = None, None, None
+        self._gating_dim_widgets: dict[str, QWidget] = {}
 
-        # Store reference to main layout for potential updates
-        self._main_layout = main_layout
+        sprue_w = QWidget()
+        sl = QVBoxLayout(sprue_w)
+        sl.setContentsMargins(0, 0, 0, 0)
+        self.sprue_top_slider, self.sprue_top_label = self._mm_slider(
+            sl, "Sprue top r", 4, 20, 8, "Radius at the pouring basin (mm).",
+        )
+        self.sprue_bot_slider, self.sprue_bot_label = self._mm_slider(
+            sl, "Sprue exit r", 2, 12, 4, "Radius at the runner — usually the choke.",
+        )
+        self.sprue_h_slider, self.sprue_h_label = self._mm_slider(
+            sl, "Sprue height", 40, 250, 100, "Basin length above the cope.",
+        )
+        self.sprue_x_slider, self.sprue_x_label = self._mm_slider(sl, "Sprue X", -200, 200, 0)
+        self.sprue_y_slider, self.sprue_y_label = self._mm_slider(sl, "Sprue Y", -200, 200, 0)
+        lay.addWidget(sprue_w)
+        self._gating_dim_widgets["Tapered Sprue"] = sprue_w
 
+        run_w = QWidget()
+        rl = QVBoxLayout(run_w)
+        rl.setContentsMargins(0, 0, 0, 0)
+        self.runner_w_slider, self.runner_w_label = self._mm_slider(
+            rl, "Runner width", 4, 24, 10, "Cross-section width (mm).",
+        )
+        self.runner_h_slider, self.runner_h_label = self._mm_slider(
+            rl, "Runner height", 4, 20, 8, "Cross-section height (mm).",
+        )
+        lay.addWidget(run_w)
+        self._gating_dim_widgets["Runner (Horizontal)"] = run_w
 
+        gate_w = QWidget()
+        gl = QVBoxLayout(gate_w)
+        gl.setContentsMargins(0, 0, 0, 0)
+        self.gate_area_slider, self.gate_area_label = self._mm_slider(
+            gl, "Gate area", 10, 200, 40, "Fan-gate hydraulic area (mm²).",
+        )
+        lay.addWidget(gate_w)
+        self._gating_dim_widgets["Fan Gate"] = gate_w
+
+        riser_w = QWidget()
+        risl = QVBoxLayout(riser_w)
+        risl.setContentsMargins(0, 0, 0, 0)
+        self.riser_x_slider, self.riser_x_label = self._mm_slider(risl, "Riser X", -200, 200, 0)
+        self.riser_y_slider, self.riser_y_label = self._mm_slider(risl, "Riser Y", -200, 200, 0)
+        lay.addWidget(riser_w)
+        self._gating_dim_widgets["Riser (Open)"] = riser_w
+
+        for w in self._gating_dim_widgets.values():
+            w.setVisible(False)
+
+        panel.content_layout.addWidget(box)
+        parent.addWidget(panel)
+        panel.setExpanded(True)
+
+    def _build_metal_panel(self, parent):
+        panel = CollapsiblePanel("Metal")
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        self.metal_combo = QComboBox()
+        for metal in METAL_DEFAULTS:
+            self.metal_combo.addItem(metal)
+        lay.addWidget(QLabel("Alloy"))
+        lay.addWidget(self.metal_combo)
+        lay.addWidget(QLabel("Mold"))
+        self.mold_combo = QComboBox()
+        for name in MOLD_TYPES:
+            self.mold_combo.addItem(name)
+        lay.addWidget(self.mold_combo)
+
+        self.pour_spin = QSpinBox()
+        self.pour_spin.setRange(800, 3200)
+        self.pour_spin.setSuffix(" °F")
+        self.pour_spin.setValue(METAL_DEFAULTS["A356 Aluminum"]["pour_temp_f"])
+        self.pour_temp_label = QLabel("Pour temp")
+        self.pour_band_label = QLabel("")
+        self.pour_band_label.setStyleSheet("color: #A6ADC8; font-size: 11px;")
+        lay.addWidget(self.pour_temp_label)
+        lay.addWidget(self.pour_spin)
+        lay.addWidget(self.pour_band_label)
+
+        self.mold_spin = QSpinBox()
+        self.mold_spin.setRange(32, 300)
+        self.mold_spin.setSuffix(" °F")
+        self.mold_spin.setValue(100)
+        self.mold_temp_label = QLabel("Mold temp")
+        lay.addWidget(self.mold_temp_label)
+        lay.addWidget(self.mold_spin)
+
+        self.thin_combo = QComboBox()
+        self.thin_combo.addItems(["Auto", "No", "Yes"])
+        self.thin_combo.setToolTip(
+            f"Auto flags walls thinner than {THIN_WALL_MM:.0f} mm."
+        )
+        lay.addWidget(QLabel("Thin wall"))
+        lay.addWidget(self.thin_combo)
+        panel.content_layout.addWidget(box)
+        parent.addWidget(panel)
+        panel.setExpanded(True)
+        self._update_pour_band()
+
+    def _build_flask_panel(self, parent):
+        panel = CollapsiblePanel("Flask")
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        self.flask_combo = QComboBox()
+        self._flask_presets = dict(FLASK_SIZES)
+        for name in self._flask_presets:
+            self.flask_combo.addItem(name)
+        self.add_flask_btn = QPushButton("+ Custom")
+        self.auto_flask_btn = QPushButton("Auto-fit")
+        row = QHBoxLayout()
+        row.addWidget(self.flask_combo)
+        row.addWidget(self.add_flask_btn)
+        lay.addLayout(row)
+        lay.addWidget(self.auto_flask_btn)
+        self.flask_h_slider = QSlider(Qt.Orientation.Horizontal)
+        self.flask_h_slider.setMinimum(3)
+        self.flask_h_slider.setMaximum(18)
+        self.flask_h_slider.setValue(int(DEFAULT_FLASK_HEIGHT_IN))
+        self.flask_h_label = QLabel(f"Stack height: {int(DEFAULT_FLASK_HEIGHT_IN)} in")
+        lay.addWidget(self.flask_h_label)
+        lay.addWidget(self.flask_h_slider)
+        self.flask_fit_label = QLabel("")
+        self.flask_fit_label.setWordWrap(True)
+        lay.addWidget(self.flask_fit_label)
+        panel.content_layout.addWidget(box)
+        parent.addWidget(panel)
+        panel.setExpanded(False)
+
+    def _build_parting_panel(self, parent):
+        panel = CollapsiblePanel("Parting line")
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        self.parting_slider = QSlider(Qt.Orientation.Horizontal)
+        self.parting_slider.setMinimum(5)
+        self.parting_slider.setMaximum(95)
+        self.parting_slider.setValue(50)
+        self.parting_label = QLabel("Position: 50%")
+        self.pick_parting_btn = QPushButton("Pick in 3D")
+        self.pick_parting_btn.setToolTip("Click in the viewport to set the cope/drag split height.")
+        lay.addWidget(self.parting_label)
+        lay.addWidget(self.parting_slider)
+        lay.addWidget(self.pick_parting_btn)
+        panel.content_layout.addWidget(box)
+        parent.addWidget(panel)
+        panel.setExpanded(False)
+
+    def _build_placement_panel(self, parent):
+        panel = CollapsiblePanel("Model placement")
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        self.x_slider = QSlider(Qt.Orientation.Horizontal)
+        self.x_slider.setRange(-500, 500)
+        self.y_slider = QSlider(Qt.Orientation.Horizontal)
+        self.y_slider.setRange(-500, 500)
+        self.z_slider = QSlider(Qt.Orientation.Horizontal)
+        self.z_slider.setRange(-200, 200)
+        self.rot_slider = QSlider(Qt.Orientation.Horizontal)
+        self.rot_slider.setRange(0, 360)
+        self.x_label = QLabel("X Offset: 0 mm")
+        self.y_label = QLabel("Y Offset: 0 mm")
+        self.z_label = QLabel("Z Offset: 0 mm")
+        self.rot_label = QLabel("Rotation: 0 deg")
+        for lab, sl in (
+            (self.x_label, self.x_slider), (self.y_label, self.y_slider),
+            (self.z_label, self.z_slider), (self.rot_label, self.rot_slider),
+        ):
+            lay.addWidget(lab)
+            lay.addWidget(sl)
+        panel.content_layout.addWidget(box)
+        parent.addWidget(panel)
+        panel.setExpanded(False)
+
+    def _build_shrink_panel(self, parent):
+        panel = CollapsiblePanel("Shrinkage")
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        self.shrink_slider = QSlider(Qt.Orientation.Horizontal)
+        self.shrink_slider.setMinimum(100)
+        self.shrink_slider.setMaximum(110)
+        self.shrink_slider.setValue(106)
+        shrink_pct = METAL_DEFAULTS["A356 Aluminum"]["shrinkage_pct"]
+        scale_val = shrink_scale_from_slider(106)
+        self.shrink_label = QLabel(f"Shrinkage: {shrink_pct}%  ·  scale ×{scale_val:.3f}")
+        self.as_cast_cb = QCheckBox("Show as-cast (no pattern scale)")
+        lay.addWidget(self.shrink_label)
+        lay.addWidget(self.shrink_slider)
+        lay.addWidget(self.as_cast_cb)
+        panel.content_layout.addWidget(box)
+        parent.addWidget(panel)
+        panel.setExpanded(False)
+
+    def _build_inspect_panel(self, parent):
+        panel = CollapsiblePanel("Foundry checks")
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        self.draft_cb = QCheckBox("Draft overlay (red = lock)")
+        self.undercut_cb = QCheckBox("Undercut / core-print overlay")
+        self.inspect_label = QLabel("")
+        self.inspect_label.setWordWrap(True)
+        lay.addWidget(self.draft_cb)
+        lay.addWidget(self.undercut_cb)
+        lay.addWidget(self.inspect_label)
+        panel.content_layout.addWidget(box)
+        parent.addWidget(panel)
+        panel.setExpanded(False)
+
+    def _mm_slider(self, layout, title, vmin, vmax, value, tooltip=""):
+        lab = QLabel(f"{title}: {value}")
+        sl = QSlider(Qt.Orientation.Horizontal)
+        sl.setMinimum(vmin)
+        sl.setMaximum(vmax)
+        sl.setValue(value)
+        if tooltip:
+            sl.setToolTip(tooltip)
+        sl.valueChanged.connect(lambda v, l=lab, t=title: l.setText(f"{t}: {v}"))
+        layout.addWidget(lab)
+        layout.addWidget(sl)
+        return sl, lab
+
+    # ------------------------------------------------------------------
+    # Signals
+    # ------------------------------------------------------------------
 
     def _wire_signals(self):
-
-        """Connect all UI signals to their handlers."""
-
-        # STL Load button
         self.load_btn.clicked.connect(self._on_load_stl)
-
-        # Demo button
         self.demo_btn.clicked.connect(self._on_load_demo)
-
-
-        # Parting slider
-        self.parting_slider.valueChanged.connect(self._on_parting_changed)
-
-
-        # Gating checkboxes
-        for name, cb in self.gating_checkboxes.items():
-            cb.stateChanged.connect(lambda state, n=name: self.viewport.set_gating(
-                [k for k, v in self.gating_checkboxes.items() if v.isChecked()]
-            ))
-
-
-        # Metal combo box
-        self.metal_combo.currentIndexChanged.connect(self._on_metal_changed)
-
-
-        # Flask combo box
-        self.flask_combo.currentTextChanged.connect(self._on_flask_changed)
-
-
-        # Add custom flask button
-        self.add_flask_btn.clicked.connect(self._on_add_flask_preset)
-
-
-        # Simulation button
         self.sim_btn.clicked.connect(self._on_simulate)
-
-
-        # Reset button
         self.reset_btn.clicked.connect(self._on_reset)
+        self.export_btn.clicked.connect(self._on_export)
+        self.save_btn.clicked.connect(self._on_save_session)
+        self.open_btn.clicked.connect(self._on_open_session)
+        self.recent_list.itemClicked.connect(self._on_recent_clicked)
 
+        self.parting_slider.valueChanged.connect(self._on_parting_changed)
+        self.pick_parting_btn.clicked.connect(self._on_pick_parting)
 
-        # Model placement sliders - X, Y, Z, Rotation
+        for name, cb in self.gating_checkboxes.items():
+            cb.stateChanged.connect(lambda _s, n=name: self._on_gating_toggled())
 
-        def update_transform():
-            dx = self.x_slider.value()
-            dy = self.y_slider.value()
-            dz = self.z_slider.value()
-            rot = self.rot_slider.value()
-            self.viewport.set_transformation(dx, dy, dz, rot)
-
-
-        self.x_slider.valueChanged.connect(lambda v: update_transform())
-        self.y_slider.valueChanged.connect(lambda v: update_transform())
-        self.z_slider.valueChanged.connect(lambda v: update_transform())
-        self.rot_slider.valueChanged.connect(lambda v: update_transform())
-
-
-        # Gating placement sliders - Sprue X, Y
-
-        def update_gating():
-            sprue_x = self.sprue_x_slider.value()
-            sprue_y = self.sprue_y_slider.value()
-            riser_x = self.riser_x_slider.value()
-            riser_y = self.riser_y_slider.value()
-            runner_y = 0
-            self.viewport.set_gating_offset(sprue_x, sprue_y, runner_y, riser_x, riser_y)
-
-
-        self.sprue_x_slider.valueChanged.connect(lambda v: update_gating())
-        self.sprue_y_slider.valueChanged.connect(lambda v: update_gating())
-        self.riser_x_slider.valueChanged.connect(lambda v: update_gating())
-        self.riser_y_slider.valueChanged.connect(lambda v: update_gating())
-
-
-        # Pour temp / mold temp live labels
-        self.pour_spin.valueChanged.connect(
-            lambda v: self.pour_temp_label.setText(f"Pour Temp: {v} °F")
-        )
+        self.metal_combo.currentIndexChanged.connect(self._on_metal_changed)
+        self.pour_spin.valueChanged.connect(self._on_pour_changed)
         self.mold_spin.valueChanged.connect(
-            lambda v: self.mold_temp_label.setText(f"Mold Temp: {v} °F")
+            lambda v: self.mold_temp_label.setText(f"Mold temp: {v} °F")
         )
 
-        # Shrinkage slider
-        def update_shrink_label(val):
-            pct = METAL_DEFAULTS[self.metal_combo.currentText()]["shrinkage_pct"]
-            scale = 1.0 + (val - 100) / 1000.0
-            self.shrink_label.setText(f"Shrinkage: {pct}%  ·  scale ×{scale:.3f}")
+        self.flask_combo.currentTextChanged.connect(self._on_flask_changed)
+        self.flask_h_slider.valueChanged.connect(self._on_flask_height_changed)
+        self.add_flask_btn.clicked.connect(self._on_add_flask_preset)
+        self.auto_flask_btn.clicked.connect(self._on_auto_flask)
 
-        self.shrink_slider.valueChanged.connect(update_shrink_label)
+        self.x_slider.valueChanged.connect(lambda _: self._apply_transform())
+        self.y_slider.valueChanged.connect(lambda _: self._apply_transform())
+        self.z_slider.valueChanged.connect(lambda _: self._apply_transform())
+        self.rot_slider.valueChanged.connect(lambda _: self._apply_transform())
 
+        self.sprue_x_slider.valueChanged.connect(lambda _: self._apply_gating_offset())
+        self.sprue_y_slider.valueChanged.connect(lambda _: self._apply_gating_offset())
+        self.riser_x_slider.valueChanged.connect(lambda _: self._apply_gating_offset())
+        self.riser_y_slider.valueChanged.connect(lambda _: self._apply_gating_offset())
 
-        # Viewport gating moved signal
+        self.shrink_slider.valueChanged.connect(self._on_shrink)
+        self.as_cast_cb.toggled.connect(self.viewport.set_show_as_cast)
+        self.viewport.set_shrink_scale(shrink_scale_from_slider(self.shrink_slider.value()))
+
+        for sl in (
+            self.sprue_top_slider, self.sprue_bot_slider, self.sprue_h_slider,
+            self.runner_w_slider, self.runner_h_slider, self.gate_area_slider,
+        ):
+            sl.valueChanged.connect(lambda _v: self._on_gating_dims())
+        self._on_gating_dims()
+
+        self.apply_ratio_btn.clicked.connect(self._on_apply_ratio)
+        self.snap_btn.clicked.connect(self._on_snap)
+
         self.viewport.gating_moved.connect(self._on_gating_moved)
+        self.viewport.model_moved.connect(self._on_model_moved)
+        self.viewport.gating_selected.connect(self._on_gating_selected)
+        self.viewport.parting_picked.connect(self._on_parting_picked)
+        self.viewport.drag_began.connect(self._push_undo)
+        self.results_text.anchorClicked.connect(self._on_result_anchor)
 
+        self.draft_cb.toggled.connect(self._on_inspect)
+        self.undercut_cb.toggled.connect(self._on_inspect)
 
-        # Initial flask setup
+        self._undo_sc = QShortcut(QKeySequence.StandardKey.Undo, self)
+        self._undo_sc.activated.connect(self._on_undo)
+        self._save_sc = QShortcut(QKeySequence.StandardKey.Save, self)
+        self._save_sc.activated.connect(self._on_save_session)
+        self._open_sc = QShortcut(QKeySequence.StandardKey.Open, self)
+        self._open_sc.activated.connect(self._on_open_session)
+
         self._on_flask_changed(self.flask_combo.currentText())
+        self._update_pour_band()
 
+    def _apply_transform(self):
+        dx, dy, dz, rot = (
+            self.x_slider.value(), self.y_slider.value(),
+            self.z_slider.value(), self.rot_slider.value(),
+        )
+        self.x_label.setText(f"X Offset: {dx} mm")
+        self.y_label.setText(f"Y Offset: {dy} mm")
+        self.z_label.setText(f"Z Offset: {dz} mm")
+        self.rot_label.setText(f"Rotation: {rot} deg")
+        self.viewport.set_transformation(dx, dy, dz, rot)
 
+    def _apply_gating_offset(self):
+        sx, sy = self.sprue_x_slider.value(), self.sprue_y_slider.value()
+        rx, ry = self.riser_x_slider.value(), self.riser_y_slider.value()
+        self.sprue_x_label.setText(f"Sprue X: {sx}")
+        self.sprue_y_label.setText(f"Sprue Y: {sy}")
+        self.riser_x_label.setText(f"Riser X: {rx}")
+        self.riser_y_label.setText(f"Riser Y: {ry}")
+        self.viewport.set_gating_offset(sx, sy, 0, rx, ry)
 
+    def _on_gating_dims(self) -> None:
+        self.viewport.set_gating_dimensions(
+            sprue_top_r=self.sprue_top_slider.value(),
+            sprue_bot_r=self.sprue_bot_slider.value(),
+            sprue_height=self.sprue_h_slider.value(),
+            runner_width=self.runner_w_slider.value(),
+            runner_height=self.runner_h_slider.value(),
+            gate_area=self.gate_area_slider.value(),
+        )
 
+    def _on_gating_toggled(self) -> None:
+        names = [k for k, v in self.gating_checkboxes.items() if v.isChecked()]
+        self.viewport.set_gating(names)
 
+    def _on_gating_selected(self, name: str) -> None:
+        for key, w in self._gating_dim_widgets.items():
+            w.setVisible(key == name)
+        self.viewport.set_selected_gating(name)
+        if name:
+            self.gating_checkboxes[name].setChecked(True)
+            self.gating_hint.setText(f"Editing {name}. Drag in 3D to place.")
 
     def _on_gating_moved(self, data: dict) -> None:
-        """Sync sliders from 3D drag operations."""
-        self.sprue_x_slider.blockSignals(True)
-        self.sprue_y_slider.blockSignals(True)
-        self.riser_x_slider.blockSignals(True)
-        self.riser_y_slider.blockSignals(True)
+        for sl in (self.sprue_x_slider, self.sprue_y_slider, self.riser_x_slider, self.riser_y_slider):
+            sl.blockSignals(True)
         self.sprue_x_slider.setValue(int(data.get("sprue_x", 0)))
         self.sprue_y_slider.setValue(int(data.get("sprue_y", 0)))
         self.riser_x_slider.setValue(int(data.get("riser_x", 0)))
         self.riser_y_slider.setValue(int(data.get("riser_y", 0)))
-        self.sprue_x_slider.blockSignals(False)
-        self.sprue_y_slider.blockSignals(False)
-        self.riser_x_slider.blockSignals(False)
-        self.riser_y_slider.blockSignals(False)
+        self.sprue_x_label.setText(f"Sprue X: {self.sprue_x_slider.value()}")
+        self.sprue_y_label.setText(f"Sprue Y: {self.sprue_y_slider.value()}")
+        self.riser_x_label.setText(f"Riser X: {self.riser_x_slider.value()}")
+        self.riser_y_label.setText(f"Riser Y: {self.riser_y_slider.value()}")
+        for sl in (self.sprue_x_slider, self.sprue_y_slider, self.riser_x_slider, self.riser_y_slider):
+            sl.blockSignals(False)
+
+    def _on_model_moved(self, data: dict) -> None:
+        self.x_slider.blockSignals(True)
+        self.y_slider.blockSignals(True)
+        self.x_slider.setValue(int(round(data.get("x", 0))))
+        self.y_slider.setValue(int(round(data.get("y", 0))))
+        self.x_label.setText(f"X Offset: {self.x_slider.value()} mm")
+        self.y_label.setText(f"Y Offset: {self.y_slider.value()} mm")
+        self.x_slider.blockSignals(False)
+        self.y_slider.blockSignals(False)
+
+    def _on_apply_ratio(self) -> None:
+        self._push_undo()
+        ratio = GATING_RATIOS[self.ratio_combo.currentText()]
+        sized = apply_gating_ratio(
+            self.sprue_bot_slider.value(), ratio,
+            runner_height_mm=self.runner_h_slider.value(),
+        )
+        self.runner_w_slider.setValue(int(round(sized["runner_width_mm"])))
+        self.gate_area_slider.setValue(int(round(max(10, min(200, sized["gate_area_mm2"])))))
+        for name in ("Tapered Sprue", "Runner (Horizontal)", "Fan Gate"):
+            self.gating_checkboxes[name].setChecked(True)
+        self._on_gating_dims()
+
+    def _on_snap(self) -> None:
+        self._push_undo()
+        if not self.viewport.models:
+            QMessageBox.information(self, "Snap", "Load a part first.")
+            return
+        self.viewport.snap_gating_to_part()
+
+    def _on_pick_parting(self) -> None:
+        self.viewport.pick_mode = "parting"
+        self.parting_label.setText("Click the viewport to set parting height…")
+
+    def _on_parting_picked(self, frac: float) -> None:
+        self.parting_slider.setValue(int(round(frac * 100)))
+
+    def _on_parting_changed(self, val: int) -> None:
+        self.viewport.set_parting(val / 100.0)
+        self.parting_label.setText(f"Position: {val}%")
+
+    def _on_pour_changed(self, val: int) -> None:
+        self.pour_temp_label.setText(f"Pour temp: {val} °F")
+
+    def _update_pour_band(self) -> None:
+        metal = METAL_DEFAULTS[self.metal_combo.currentText()]
+        lo, hi = recommended_pour_band(metal)
+        self.pour_band_label.setText(f"Recommended {lo}–{hi} °F")
+
+    def _on_metal_changed(self, index: int) -> None:
+        metal_name = self.metal_combo.currentText()
+        metal = METAL_DEFAULTS[metal_name]
+        self.pour_spin.setValue(metal["pour_temp_f"])
+        shrink_slider = min(self.shrink_slider.maximum(), 100 + int(round(metal["shrinkage_pct"])))
+        self.shrink_slider.setValue(shrink_slider)
+        self.viewport.set_active_metal(metal_name)
+        self._update_pour_band()
+        self._on_shrink(self.shrink_slider.value())
+
+    def _on_shrink(self, val: int) -> None:
+        pct = METAL_DEFAULTS[self.metal_combo.currentText()]["shrinkage_pct"]
+        scale = shrink_scale_from_slider(val)
+        self.shrink_label.setText(f"Shrinkage: {pct}%  ·  scale ×{scale:.3f}")
+        self.viewport.set_shrink_scale(scale)
+
+    def _on_flask_changed(self, text: str) -> None:
+        size = self._flask_presets.get(text, (8, 10))
+        self.viewport.set_flask(size, height_in=self.flask_h_slider.value())
+        self._refresh_flask_fit()
+
+    def _on_flask_height_changed(self, val: int) -> None:
+        self.flask_h_label.setText(f"Stack height: {val} in")
+        size = self._flask_presets.get(self.flask_combo.currentText(), (8, 10))
+        self.viewport.set_flask(size, height_in=val)
+
+    def _current_flask_fit(self) -> dict:
+        xmin, xmax, ymin, ymax, zmin, zmax = self.viewport._compute_bounds()
+        size = self._flask_presets.get(self.flask_combo.currentText(), (8, 10))
+        return flask_fit(xmin, xmax, ymin, ymax, float(size[0]), float(size[1]),
+                         presets=self._flask_presets)
+
+    def _refresh_flask_fit(self) -> None:
+        info = self._current_flask_fit()
+        if not self.viewport.models:
+            self.flask_fit_label.setText("")
+            return
+        if info["fits"]:
+            self.flask_fit_label.setText(
+                f"Clears the part ({info['need_w_in']:.1f} × {info['need_d_in']:.1f} in needed)."
+            )
+        else:
+            sug = info["suggested"] or "a custom flask"
+            self.flask_fit_label.setText(
+                f"Too small — need {info['need_w_in']:.1f} × {info['need_d_in']:.1f} in. Try {sug}."
+            )
+
+    def _on_auto_flask(self) -> None:
+        info = self._current_flask_fit()
+        if info["suggested"]:
+            self.flask_combo.setCurrentText(info["suggested"])
+        else:
+            QMessageBox.information(self, "Flask", "No preset is large enough — add a custom flask.")
+
+    def _on_add_flask_preset(self):
+        text, ok = QInputDialog.getText(
+            self, "Add Custom Flask",
+            "name, width_in, depth_in[, height_in]\ne.g. 10x12x8, 10, 12, 8",
+        )
+        if ok and text:
+            try:
+                parts = [p for p in text.replace(" ", "").split(",") if p]
+                name, width, height = parts[0], float(parts[1]), float(parts[2])
+                preset = (width, height)
+                if len(parts) >= 4:
+                    self.flask_h_slider.setValue(int(round(float(parts[3]))))
+                    preset = (width, height, float(parts[3]))
+                self._flask_presets[name] = preset
+                self.flask_combo.addItem(name)
+                self.flask_combo.setCurrentText(name)
+            except Exception as e:
+                QMessageBox.warning(self, "Error", "Invalid format: " + str(e))
+
+    def _on_inspect(self) -> None:
+        if self.draft_cb.isChecked():
+            self.undercut_cb.blockSignals(True)
+            self.undercut_cb.setChecked(False)
+            self.undercut_cb.blockSignals(False)
+            self.viewport.set_overlay_mode("draft")
+            mesh = self.viewport.world_meshes()
+            if mesh is not None:
+                d = draft_analysis(mesh)
+                self.inspect_label.setText(
+                    f"{d['lock_count']} faces below {d['min_draft_deg']:.1f}° min draft "
+                    f"({100 * d['lock_frac']:.0f}% of the surface)."
+                )
+            return
+        if self.undercut_cb.isChecked():
+            self.viewport.set_overlay_mode("undercut")
+            mesh = self.viewport.world_meshes()
+            if mesh is not None:
+                xmin, xmax, ymin, ymax, zmin, zmax = self.viewport._compute_bounds()
+                z_part = zmin + max(zmax - zmin, 1.0) * self.viewport.parting_z
+                u = undercut_hints(mesh, z_part)
+                self.inspect_label.setText(
+                    f"{u['count']} faces look like undercuts / core prints "
+                    f"({100 * u['frac']:.0f}% of the surface)."
+                )
+            return
+        self.viewport.set_overlay_mode("")
+        self.inspect_label.setText("")
+
+    # ------------------------------------------------------------------
+    # File / session
+    # ------------------------------------------------------------------
+
+    def _set_stl_label(self, title: str, stats: dict) -> None:
+        extra = ""
+        warn = stats.get("mesh_warnings") or []
+        if warn:
+            extra += "\n⚠ " + " ".join(warn)
+        if stats.get("thin_wall_auto"):
+            extra += f"\nThin wall: min {stats.get('min_wall_mm', 0):.1f} mm"
+        self.stl_label.setText(
+            f"{title}\nVolume: {stats['vol_cm3']:.2f} cm³   Surface: {stats['surf_cm2']:.2f} cm²"
+            f"{extra}"
+        )
 
     def _on_load_stl(self) -> None:
-        """Handle STL file load button click."""
         filename, _ = QFileDialog.getOpenFileName(
             self, "Load STL File", "", "STL Files (*.stl);;All Files (*)"
         )
         if filename:
-            try:
-                stats = self.viewport.load_stl(filename)
-                self.stl_label.setText(f"Loaded: {filename}\nVolume: {round(stats['vol_cm3'], 2)} cm^3\nSurface: {round(stats['surf_cm2'], 2)} cm^2")
-                self._geometry_stats = stats
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to load STL:\n{str(e)}")
+            self._load_stl_path(filename)
+
+    def _load_stl_path(self, filename: str) -> None:
+        try:
+            stats = self.viewport.load_stl(filename)
+            self._geometry_stats = stats
+            self._stl_path = filename
+            self._is_demo = False
+            self._set_stl_label(f"Loaded: {Path(filename).name}", stats)
+            remember_project(filename)
+            self._refresh_recents()
+            self._refresh_flask_fit()
+            if stats.get("mesh_warnings"):
+                QMessageBox.warning(
+                    self, "Mesh quality",
+                    "This STL may not be a closed solid:\n\n" + "\n".join(stats["mesh_warnings"]),
+                )
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load STL:\n{str(e)}")
 
     def _on_load_demo(self) -> None:
-        """Load the built-in Motor Mount Bracket demo with pre-configured settings."""
-        # 1. Reset to clean state (clears animations, sliders, gating)
         self._on_reset()
-
-        # 2. Build the procedural mesh
+        self.viewport.clear_scene()
         triangles, normals, stats = build_demo_mesh()
-
-        # 3. Inject into viewport — bypasses load_stl / file dialog entirely
         self.viewport.models[DEMO_PART_NAME] = {
             "render_data": triangles,
-            "normals":     normals,
-            "mesh":        None,
+            "normals": normals,
+            "mesh": None,
+            "thickness": local_thickness(triangles),
         }
         self.viewport.transforms[DEMO_PART_NAME] = {
-            "offset":   np.array([0.0, 0.0, 0.0]),
+            "offset": np.array([0.0, 0.0, 0.0]),
             "rotation": 0.0,
         }
         self.viewport.active_model = DEMO_PART_NAME
-
-        # 4. Store geometry stats for the simulation worker
         self._geometry_stats = stats
-
-        # 5. Flask: 10 x 12 inches
+        thick = self.viewport.models[DEMO_PART_NAME]["thickness"]
+        min_w = float(np.min(thick)) if len(thick) else 999.0
+        self._geometry_stats["min_wall_mm"] = min_w
+        self._geometry_stats["thin_wall_auto"] = min_w < THIN_WALL_MM
+        self._stl_path = None
+        self._is_demo = True
         self.flask_combo.setCurrentText("10 x 12")
-
-        # 6. Metal: A356 Aluminum (fires _on_metal_changed → sets pour temp)
         self.metal_combo.setCurrentText("A356 Aluminum")
-
-        # 7. Pour temp: 1160 F  (superheat = 85 F → triggers cold-shut + low-superheat)
         self.pour_spin.setValue(1160)
-
-        # 8. Mold temp: default 100 F (already set by reset)
-
-        # 9. Thin wall: Yes — needed for cold-shut defect detection
-        self.thin_combo.setCurrentIndex(1)
-
-        # 10. Parting line at 39% — bisects central body just above base plate
+        self.thin_combo.setCurrentText("Yes")
         self.parting_slider.setValue(39)
-
-        # 11. Gating: full set
         for name in ["Tapered Sprue", "Runner (Horizontal)", "Fan Gate", "Riser (Open)"]:
             self.gating_checkboxes[name].setChecked(True)
-
-        # 12. Sprue at (+100, +100) — right-front corner; riser at (-80, +70)
         self.sprue_x_slider.setValue(100)
         self.sprue_y_slider.setValue(100)
         self.riser_x_slider.setValue(-80)
         self.riser_y_slider.setValue(70)
-
-        # 13. Update the STL label
-        self.stl_label.setText(
-            "Demo: Motor Mount Bracket\n"
-            f"Volume: {stats['vol_cm3']:.2f} cm\u00b3 | Surface: {stats['surf_cm2']:.2f} cm\u00b2\n"
-            "Height: 102 mm  \u2014  7 primitives"
-        )
-
-        # 14. Final render with all new state
+        self._set_stl_label("Demo: Motor Mount Bracket", stats)
+        self.stl_label.setText(self.stl_label.text() + "\nHeight: 102 mm — 7 primitives")
         self.viewport.render()
+        self._refresh_flask_fit()
 
-    def _on_parting_changed(self, val: int) -> None:
-        """Handle parting line slider change."""
-        frac = val / 100.0
-        self.viewport.set_parting(frac)
-        parent_widget = self.parting_slider.parent()
-        if parent_widget:
-            for i in range(parent_widget.layout().count()):
-                widget = parent_widget.layout().itemAt(i).widget()
-                if isinstance(widget, QLabel) and "Position:" in widget.text():
-                    widget.setText("Position: " + str(val) + "%")
-                    break
+    def _collect_session(self) -> dict:
+        data = default_session()
+        data.update({
+            "stl_path": self._stl_path,
+            "demo": self._is_demo,
+            "metal": self.metal_combo.currentText(),
+            "pour_temp_f": self.pour_spin.value(),
+            "mold_temp_f": self.mold_spin.value(),
+            "mold_type": self.mold_combo.currentText(),
+            "thin_wall": self.thin_combo.currentText(),
+            "parting_pct": self.parting_slider.value(),
+            "flask": self.flask_combo.currentText(),
+            "flask_height_in": self.flask_h_slider.value(),
+            "gating": [k for k, v in self.gating_checkboxes.items() if v.isChecked()],
+            "sprue_top_r": self.sprue_top_slider.value(),
+            "sprue_bot_r": self.sprue_bot_slider.value(),
+            "sprue_height": self.sprue_h_slider.value(),
+            "runner_width": self.runner_w_slider.value(),
+            "runner_height": self.runner_h_slider.value(),
+            "gate_area": self.gate_area_slider.value(),
+            "sprue_x": self.sprue_x_slider.value(),
+            "sprue_y": self.sprue_y_slider.value(),
+            "riser_x": self.riser_x_slider.value(),
+            "riser_y": self.riser_y_slider.value(),
+            "model_x": self.x_slider.value(),
+            "model_y": self.y_slider.value(),
+            "model_z": self.z_slider.value(),
+            "model_rot": self.rot_slider.value(),
+            "shrink_slider": self.shrink_slider.value(),
+            "gating_ratio": self.ratio_combo.currentText(),
+        })
+        return data
 
-    def _on_metal_changed(self, index: int) -> None:
-        """Handle metal combo box change."""
-        metal_name = self.metal_combo.currentText()
-        pour_temp  = METAL_DEFAULTS[metal_name]["pour_temp_f"]
-        shrink_pct = METAL_DEFAULTS[metal_name]["shrinkage_pct"]
-        self.pour_spin.setValue(pour_temp)
-        self.pour_temp_label.setText(f"Pour Temp: {pour_temp} °F")
-        scale_val = 1.0 + (self.shrink_slider.value() - 100) / 1000.0
-        self.shrink_label.setText(f"Shrinkage: {shrink_pct}%  ·  scale ×{scale_val:.3f}")
-        self.viewport.set_active_metal(metal_name)
+    def _apply_session(self, data: dict, load_mesh: bool = True) -> None:
+        if load_mesh:
+            if data.get("demo"):
+                self._on_load_demo()
+            elif data.get("stl_path") and Path(data["stl_path"]).exists():
+                self._load_stl_path(data["stl_path"])
+        if data.get("metal"):
+            self.metal_combo.setCurrentText(data["metal"])
+        self.pour_spin.setValue(int(data.get("pour_temp_f", 1300)))
+        self.mold_spin.setValue(int(data.get("mold_temp_f", 100)))
+        if data.get("mold_type"):
+            self.mold_combo.setCurrentText(data["mold_type"])
+        if data.get("thin_wall"):
+            self.thin_combo.setCurrentText(data["thin_wall"])
+        self.parting_slider.setValue(int(data.get("parting_pct", 50)))
+        if data.get("flask"):
+            self.flask_combo.setCurrentText(data["flask"])
+        self.flask_h_slider.setValue(int(data.get("flask_height_in", 6)))
+        for name, cb in self.gating_checkboxes.items():
+            cb.setChecked(name in (data.get("gating") or []))
+        self.sprue_top_slider.setValue(int(data.get("sprue_top_r", 8)))
+        self.sprue_bot_slider.setValue(int(data.get("sprue_bot_r", 4)))
+        self.sprue_h_slider.setValue(int(data.get("sprue_height", 100)))
+        self.runner_w_slider.setValue(int(data.get("runner_width", 10)))
+        self.runner_h_slider.setValue(int(data.get("runner_height", 8)))
+        self.gate_area_slider.setValue(int(data.get("gate_area", 40)))
+        self.sprue_x_slider.setValue(int(data.get("sprue_x", 0)))
+        self.sprue_y_slider.setValue(int(data.get("sprue_y", 0)))
+        self.riser_x_slider.setValue(int(data.get("riser_x", 0)))
+        self.riser_y_slider.setValue(int(data.get("riser_y", 0)))
+        self.x_slider.setValue(int(data.get("model_x", 0)))
+        self.y_slider.setValue(int(data.get("model_y", 0)))
+        self.z_slider.setValue(int(data.get("model_z", 0)))
+        self.rot_slider.setValue(int(data.get("model_rot", 0)))
+        self.shrink_slider.setValue(int(data.get("shrink_slider", 106)))
+        if data.get("gating_ratio"):
+            self.ratio_combo.setCurrentText(data["gating_ratio"])
 
-    def _on_flask_changed(self, text: str) -> None:
-        """Handle flask size combo box change."""
-        size = self._flask_presets.get(text, (8, 10))
-        self.viewport.set_flask(size)
-
-    def _on_add_flask_preset(self):
-        """Add custom flask preset."""
-        text, ok = QInputDialog.getText(
-            self, "Add Custom Flask",
-            "Enter name, width, height (e.g., '10x12, 10, 12'):"
+    def _on_save_session(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save casting session", "job.cast.json", "Casting session (*.cast.json *.json)",
         )
-        if ok and text:
-            try:
-                parts = text.replace(" ", "").split(",")
-                name = parts[0]
-                width = float(parts[1])
-                height = float(parts[2])
-                self._flask_presets[name] = (width, height)
-                self.flask_combo.addItem(name)
-            except Exception as e:
-                QMessageBox.warning(self, "Error", "Invalid format: " + str(e))
+        if not path:
+            return
+        if not path.endswith(".json"):
+            path += ".cast.json"
+        save_session(path, self._collect_session())
+        remember_project(path)
+        self._refresh_recents()
+        QMessageBox.information(self, "Saved", path)
+
+    def _on_open_session(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open casting session", "", "Casting session (*.cast.json *.json);;All (*)",
+        )
+        if path:
+            self._open_path(path)
+
+    def _open_path(self, path: str) -> None:
+        p = Path(path)
+        if p.suffix.lower() == ".stl":
+            self._load_stl_path(path)
+            return
+        try:
+            data = load_session(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Open failed", str(e))
+            return
+        self._apply_session(data)
+        remember_project(path)
+        self._refresh_recents()
+
+    def _refresh_recents(self) -> None:
+        self.recent_list.clear()
+        for path in recent_projects():
+            item = QListWidgetItem(Path(path).name)
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            item.setToolTip(path)
+            self.recent_list.addItem(item)
+
+    def _on_recent_clicked(self, item: QListWidgetItem) -> None:
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if path:
+            self._open_path(path)
+
+    def _push_undo(self) -> None:
+        self._undo_stack.append(self._collect_session())
+        self._undo_stack = self._undo_stack[-40:]
+
+    def _on_undo(self) -> None:
+        if not self._undo_stack:
+            return
+        data = self._undo_stack.pop()
+        self._apply_session(data, load_mesh=False)
+
+    # ------------------------------------------------------------------
+    # Simulate
+    # ------------------------------------------------------------------
+
+    def _thin_wall_flag(self) -> bool:
+        mode = self.thin_combo.currentText()
+        if mode == "Yes":
+            return True
+        if mode == "No":
+            return False
+        if "thin_wall_auto" not in self._geometry_stats and self.viewport.models:
+            chunks = [data["render_data"] for data in self.viewport.models.values()]
+            thick = local_thickness(np.concatenate(chunks, axis=0))
+            min_w = float(np.min(thick)) if len(thick) else 999.0
+            self._geometry_stats["min_wall_mm"] = min_w
+            self._geometry_stats["thin_wall_auto"] = min_w < THIN_WALL_MM
+        return bool(self._geometry_stats.get("thin_wall_auto"))
 
     def _on_simulate(self) -> None:
-        """Run the casting simulation."""
-        # Gather all parameters
         metal_name = self.metal_combo.currentText()
         metal_params = METAL_DEFAULTS[metal_name]
+        scale = shrink_scale_from_slider(self.shrink_slider.value())
+        vol, surf, z_max = scale_geometry(
+            self._geometry_stats.get("vol_cm3", 100.0),
+            self._geometry_stats.get("surf_cm2", 120.0),
+            self._geometry_stats.get("z_max", 100.0),
+            scale,
+        )
         params = {
-            'metal': metal_name,
-            'pour_temp_f': self.pour_spin.value(),
-            'mold_temp_f': self.mold_spin.value(),
-            'thin_wall': self.thin_combo.currentIndex() == 1,
-            'shrinkage': metal_params['shrinkage_pct'],
-            'gate_types': [name for name, cb in self.gating_checkboxes.items() if cb.isChecked()],
-            'vol_cm3': self._geometry_stats.get('vol_cm3', 100.0),
-            'surf_cm2': self._geometry_stats.get('surf_cm2', 120.0),
-            'has_riser': 'Riser (Open)' in self.viewport.gating,
-            'gating_params': self.viewport.get_gating_params(),
-            'runner_y_offset': self.viewport.runner_y_offset,
-            'shrink_scale': 1.0 + (self.shrink_slider.value() - 100) / 1000.0,
-            'z_max': self._geometry_stats.get('z_max', 100.0),
+            "metal": metal_name,
+            "pour_temp_f": self.pour_spin.value(),
+            "mold_temp_f": self.mold_spin.value(),
+            "mold_type": self.mold_combo.currentText(),
+            "thin_wall": self._thin_wall_flag(),
+            "shrinkage": metal_params["shrinkage_pct"],
+            "gate_types": [n for n, cb in self.gating_checkboxes.items() if cb.isChecked()],
+            "vol_cm3": vol,
+            "surf_cm2": surf,
+            "has_riser": "Riser (Open)" in self.viewport.gating,
+            "gating_params": self.viewport.get_gating_params(),
+            "runner_y_offset": self.viewport.runner_y_offset,
+            "shrink_scale": scale,
+            "z_max": z_max,
+            "flask_fit": self._current_flask_fit(),
         }
-        # Run simulation in a thread
         self.progress_bar.setVisible(True)
         self.sim_btn.setEnabled(False)
         self.reset_btn.setEnabled(False)
         self._sim_thread = QThread()
         self._sim_worker = SimWorker(params)
         self._sim_worker.moveToThread(self._sim_thread)
-        self._sim_worker.progress.connect(lambda pct, msg: self._on_sim_progress(pct, msg))
-        self._sim_worker.finished.connect(lambda result: self._on_sim_done(result))
+        self._sim_worker.progress.connect(self._on_sim_progress)
+        self._sim_worker.finished.connect(self._on_sim_done)
         self._sim_worker.finished.connect(self._sim_thread.quit)
         self._sim_worker.finished.connect(self._sim_worker.deleteLater)
         self._sim_thread.finished.connect(self._sim_thread.deleteLater)
@@ -608,50 +955,80 @@ class MainWindow(QMainWindow):
         self._sim_thread.start()
 
     def _on_sim_progress(self, pct: int, msg: str) -> None:
-        """Update progress during simulation."""
         self.progress_bar.setFormat(f"{msg} {int(pct)}%")
         self.progress_bar.setValue(int(pct))
 
     def _on_sim_done(self, result: dict) -> None:
-        """Handle simulation completion."""
         self.progress_bar.setVisible(False)
         self.sim_btn.setEnabled(True)
         self.reset_btn.setEnabled(True)
-        if result:
-            self._last_result = result
-            self.results_text.setHtml(build_results_text(result))
-            # Decorate defects for drawing
-            defects = result.get("defects", [])
-            decorated_defects = []
-            for d in defects:
-                if isinstance(d, tuple):
-                    decorated_defects.append(d)
-                elif "shrinkage" in d.lower():
-                    decorated_defects.append(("shrinkage_risk", 0, 0, result.get("z_max", 100)))
-                elif "cold" in d.lower():
-                    decorated_defects.append(("cold_shut_risk", 0, 0, result.get("z_max", 100)))
-                else:
-                    decorated_defects.append(d)
-            # Start animations with draw_defect_markers as final callback
-            duration = max(2.0, result.get("fill_time_s", 3.0))
-            vsr = result.get("vsr", 1.0)
-            self.viewport.start_fill_animation(
-                duration_s=duration,
-                on_done=lambda: self.viewport.draw_defect_markers(decorated_defects, vsr)
-            )
-        else:
+        if not result:
             self.results_text.setHtml(
-                "<p style='color:#F38BA8;font-family:Consolas,monospace;font-size:11px;'>"
-                "Simulation failed or was cancelled.</p>"
+                "<p style='color:#F38BA8;'>Simulation failed or was cancelled.</p>"
             )
+            return
+        self._last_result = result
+        self.results_text.setHtml(build_results_text(result))
+        self.viewport.set_restrictive(result.get("restrictive_elem") or "")
+        defects = result.get("defects", [])
+        warnings = result.get("warnings", [])
+        sites = self.viewport.defect_sites()
+        decorated = []
+
+        def _site(kind: str):
+            xyz = sites.get(kind) or (0.0, 0.0, result.get("z_max", 100))
+            return (kind, float(xyz[0]), float(xyz[1]), float(xyz[2]))
+
+        for d in defects:
+            if isinstance(d, tuple):
+                decorated.append(d)
+            elif "shrinkage" in d.lower() or "porosity" in d.lower():
+                decorated.append(_site("shrinkage_risk"))
+            elif "cold" in d.lower():
+                decorated.append(_site("cold_shut_risk"))
+            elif "misrun" in d.lower():
+                decorated.append(_site("misrun_risk"))
+        for w in warnings:
+            if "porosity" in w.lower() or "shrinkage" in w.lower() or "riser" in w.lower():
+                decorated.append(_site("shrinkage_risk"))
+        duration = max(2.0, min(8.0, result.get("fill_time_s", 3.0)))
+        vsr = result.get("vsr", 1.0)
+        self.viewport.start_fill_animation(
+            duration_s=duration,
+            fill_s=result.get("fill_time_s", duration),
+            solidify_min=result.get("t_solidify_min", 3.0),
+            on_done=lambda: self.viewport.draw_defect_markers(decorated, vsr),
+        )
+
+    def _on_result_anchor(self, url: QUrl) -> None:
+        kind = url.toString()
+        if kind.startswith("defect:"):
+            kind = kind.split(":", 1)[1]
+        sites = self.viewport.defect_sites()
+        xyz = sites.get(kind)
+        if xyz:
+            self.viewport.look_at(*xyz)
+            return
+        gp = self.viewport.get_gating_params()
+        xmin, xmax, ymin, ymax, zmin, zmax = self.viewport._compute_bounds()
+        z_part = zmin + max(zmax - zmin, 1.0) * self.viewport.parting_z
+        from simulation.foundry import choke_location
+        loc = choke_location(
+            self.viewport.restrictive_elem or "sprue_exit",
+            (float(self.viewport.sprue_offset[0]), float(self.viewport.sprue_offset[1])),
+            (float(self.viewport.riser_offset[0]), float(self.viewport.riser_offset[1])),
+            z_part, zmax,
+        )
+        if loc:
+            self.viewport.look_at(*loc)
 
     def _on_reset(self) -> None:
-        """Reset the application state."""
         self.viewport.reset_anim()
-        # Reset sliders to defaults
-        metal_name = self.metal_combo.currentText()
-        self.pour_spin.setValue(METAL_DEFAULTS[metal_name]["pour_temp_f"])
+        metal = METAL_DEFAULTS[self.metal_combo.currentText()]
+        self.pour_spin.setValue(metal["pour_temp_f"])
         self.mold_spin.setValue(100)
+        self.thin_combo.setCurrentIndex(0)
+        self.parting_slider.setValue(50)
         self.x_slider.setValue(0)
         self.y_slider.setValue(0)
         self.z_slider.setValue(0)
@@ -660,10 +1037,73 @@ class MainWindow(QMainWindow):
         self.sprue_y_slider.setValue(0)
         self.riser_x_slider.setValue(0)
         self.riser_y_slider.setValue(0)
-        # Reset checkboxes
+        self.shrink_slider.setValue(min(110, 100 + int(round(metal["shrinkage_pct"]))))
         for cb in self.gating_checkboxes.values():
             cb.setChecked(False)
-        # Clear results
-        self.results_text.setText("")
-        self.stl_label.setText("No file loaded")
+        self.results_text.setHtml("")
         self._last_result = None
+        self.viewport.set_restrictive("")
+        self.as_cast_cb.setChecked(False)
+        self.draft_cb.setChecked(False)
+        self.undercut_cb.setChecked(False)
+
+    def _on_export(self) -> None:
+        if not self._last_result:
+            QMessageBox.information(self, "Export", "Run a simulation first.")
+            return
+        path, selected = QFileDialog.getSaveFileName(
+            self, "Export results", "casting_results.html",
+            "HTML (*.html);;PDF (*.pdf);;PNG screenshot (*.png)",
+        )
+        if not path:
+            return
+        html = build_results_text(self._last_result)
+        lower = path.lower()
+        try:
+            if lower.endswith(".png") or "PNG" in selected:
+                if not lower.endswith(".png"):
+                    path += ".png"
+                self.viewport.screenshot(path)
+            elif lower.endswith(".pdf") or "PDF" in selected:
+                if not lower.endswith(".pdf"):
+                    path += ".pdf"
+                from PyQt6.QtGui import QTextDocument
+                from PyQt6.QtPrintSupport import QPrinter
+                printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+                printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+                printer.setOutputFileName(path)
+                doc = QTextDocument()
+                doc.setHtml(html)
+                doc.print(printer)
+            else:
+                if not lower.endswith(".html"):
+                    path += ".html"
+                Path(path).write_text(html, encoding="utf-8")
+                try:
+                    self.viewport.screenshot(path.rsplit(".", 1)[0] + ".png")
+                except Exception:
+                    pass
+        except Exception as e:
+            QMessageBox.critical(self, "Export failed", str(e))
+            return
+        QMessageBox.information(self, "Export", f"Saved:\n{path}")
+
+    def closeEvent(self, event) -> None:
+        if self._sim_thread is not None:
+            try:
+                if self._sim_thread.isRunning():
+                    self._sim_thread.quit()
+                    self._sim_thread.wait(2000)
+            except RuntimeError:
+                pass
+        self.viewport.reset_anim()
+        event.accept()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if not getattr(self.viewport, "use_pyvista", False):
+            try:
+                self.viewport.fig.tight_layout()
+                self.viewport.fig.canvas.draw_idle()
+            except Exception:
+                pass

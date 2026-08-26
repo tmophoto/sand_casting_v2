@@ -1,4 +1,5 @@
-"""Format simulation result dict → HTML string for QTextEdit rich text display."""
+"""Format simulation result dict → HTML string for QTextEdit / QTextBrowser."""
+import html
 import textwrap
 
 
@@ -19,6 +20,12 @@ _LABELS = {
     "Thin":     (0.0,  0.5),
     "Standard": (0.5,  1.5),
     "Heavy":    (1.5,  999),
+}
+
+_VERDICT = {
+    "ok":   ("Likely OK", _C["ok"], "#1e3a2f"),
+    "risky": ("Risky", _C["warn"], "#3a2e1e"),
+    "fail": ("Will probably fail", _C["defect"], "#3a1e28"),
 }
 
 
@@ -50,38 +57,50 @@ def _section(title: str) -> str:
     )
 
 
+def _verdict_banner(r: dict) -> str:
+    key = r.get("verdict") or ("fail" if r.get("defects") else ("risky" if r.get("warnings") else "ok"))
+    title, fg, bg = _VERDICT.get(key, _VERDICT["risky"])
+    return (
+        f'<tr><td colspan="2" style="background:{bg};color:{fg};font-weight:bold;'
+        f'padding:8px 6px;border-radius:4px;font-size:13px;">{html.escape(title)}</td></tr>'
+    )
+
+
 def build_results_text(r: dict) -> str:
-    """Return an HTML string suitable for QTextEdit.setHtml()."""
+    """Return an HTML string suitable for QTextBrowser.setHtml()."""
     vsr     = r.get("vsr", 0.0)
     defects = r.get("defects", [])
     warnings = r.get("warnings", [])
+    fixes = r.get("fixes") or []
 
-    # VSR classification
     vsr_label = _vsr_class(vsr)
     vsr_color = _C["warn"] if vsr_label == "Heavy" else (
         _C["ok"] if vsr_label == "Standard" else _C["value"]
     )
 
-    # Fill velocity
     vel = r.get("fill_velocity_mm_s", 0.0)
     vel_str = f"{vel:.0f} mm/s" if vel > 0 else "n/a (no gating)"
 
-    # Fill sanity
     fill_ok = r.get("fill_possible", True)
     fill_ok_str = "Yes" if fill_ok else "⚠ No — may freeze before full"
     fill_ok_color = _C["ok"] if fill_ok else _C["warn"]
 
-    # Cooling rate
     cr = r.get("cooling_rate", 0.0)
     cr_str = f"{cr:.0f} °F/min" if cr > 0 else "n/a"
 
-    # Superheat color
     superheat = r.get("superheat", 0.0)
-    sh_color = _C["defect"] if superheat < 50 else (_C["warn"] if superheat < 100 else _C["ok"])
+    min_sh = r.get("min_superheat_f", 50)
+    sh_color = _C["defect"] if superheat < min_sh else (
+        _C["warn"] if superheat < min_sh * 2 else _C["ok"]
+    )
 
     rows = []
+    rows.append(_verdict_banner(r))
+    rows.append(_divider())
+
     rows.append(_section("INPUT"))
     rows.append(_row("Metal",     r.get("metal", "—")))
+    rows.append(_row("Mold",      r.get("mold_type", "Green sand")))
     rows.append(_row("Pour temp", f"{r.get('pour_f', 0):.0f} °F"))
     rows.append(_row("Mold temp", f"{r.get('mold_f', 0):.0f} °F"))
     rows.append(_row("Superheat", f"{superheat:.1f} °F", sh_color))
@@ -90,25 +109,56 @@ def build_results_text(r: dict) -> str:
     rows.append(_section("GEOMETRY"))
     rows.append(_row("Volume",   f"{r.get('vol_cm3', 0):.2f} cm³"))
     rows.append(_row("Surface",  f"{r.get('surf_cm2', 0):.2f} cm²"))
+    mass_g = r.get("pour_mass_g")
+    if mass_g is not None:
+        rows.append(_row("Melt mass", f"{mass_g:.0f} g"))
+    part_g = r.get("part_mass_g")
+    if part_g is not None:
+        rows.append(_row("Part mass", f"{part_g:.0f} g"))
+    if r.get("gating_cm3") is not None:
+        rows.append(_row("Gating vol", f"{r.get('gating_cm3', 0):.1f} cm³"))
+    if r.get("yield_pct") is not None:
+        y = r["yield_pct"]
+        y_color = _C["ok"] if y >= 60 else (_C["warn"] if y >= 40 else _C["defect"])
+        rows.append(_row("Casting yield", f"{y:.0f} %", y_color))
     rows.append(_row("V/S ratio", f"{vsr:.3f} cm  ({vsr_label})", vsr_color))
     rows.append(_divider())
 
     rows.append(_section("SIMULATION"))
     rows.append(_row("Fill time",    f"{r.get('fill_time_s', 0):.1f} s"))
     rows.append(_row("Fill vel",     vel_str))
-    rows.append(_row("Restrictive",  r.get("restrictive_elem", "—")))
+    choke = r.get("restrictive_elem", "—")
+    rows.append(_row("Choke",  choke))
     rows.append(_row("Fill OK?",     fill_ok_str, fill_ok_color))
     rows.append(_row("Solidify",     f"{r.get('t_solidify_min', 0):.2f} min"))
     rows.append(_row("Cooling",      cr_str))
     rows.append(_divider())
 
-    if defects:
+    if fixes:
+        rows.append(_section("WHAT TO CHANGE"))
+        for item in fixes:
+            kind = item.get("kind") or "other"
+            body = item.get("fix") or item.get("text") or ""
+            href = f"defect:{kind}"
+            color = _C["defect"] if kind.endswith("risk") else _C["warn"]
+            for line in textwrap.wrap(body, 44):
+                safe = html.escape(line)
+                rows.append(
+                    f'<tr><td colspan="2" style="color:{color};padding:1px 4px 1px 12px;">'
+                    f'• <a href="{href}" style="color:{color};text-decoration:underline;">{safe}</a>'
+                    f'</td></tr>'
+                )
+            rows.append(
+                f'<tr><td colspan="2" style="color:{_C["dim"]};padding:0 4px 4px 12px;font-size:10px;">'
+                f'<a href="{href}" style="color:{_C["dim"]};">click to fly camera →</a></td></tr>'
+            )
+    elif defects:
         rows.append(_section("&#10007; DEFECT RISKS"))
         for d in defects:
             for line in textwrap.wrap(d, 44):
                 rows.append(
                     f'<tr><td colspan="2" style="color:{_C["defect"]};padding:1px 4px 1px 12px;">'
-                    f'• {line}</td></tr>'
+                    f'• {html.escape(line)}</td></tr>'
                 )
     else:
         rows.append(
@@ -116,13 +166,13 @@ def build_results_text(r: dict) -> str:
             f'&#10003; No defect risks detected.</td></tr>'
         )
 
-    if warnings:
+    if warnings and not fixes:
         rows.append(_section("&#9888; WARNINGS"))
         for w in warnings:
             for line in textwrap.wrap(w, 44):
                 rows.append(
                     f'<tr><td colspan="2" style="color:{_C["warn"]};padding:1px 4px 1px 12px;">'
-                    f'• {line}</td></tr>'
+                    f'• {html.escape(line)}</td></tr>'
                 )
 
     table = (
