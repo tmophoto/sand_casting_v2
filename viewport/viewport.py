@@ -569,19 +569,25 @@ class Viewport3D(QWidget):
 
             cope_alpha = 0.12 if self.overlay_mode == "xray" else 1.0
             drag_alpha = 0.12 if self.overlay_mode == "xray" else 1.0
-            cope_colors = [cope_base + (cope_alpha,)] * len(cope_verts)
-            drag_colors = [drag_base + (drag_alpha,)] * len(drag_verts)
+            cope_rgba = np.array(cope_base + (cope_alpha,), dtype=float)
+            drag_rgba = np.array(drag_base + (drag_alpha,), dtype=float)
+            cope_colors = np.broadcast_to(cope_rgba, (len(cope_verts), 4)).copy() if len(cope_verts) else np.zeros((0, 4))
+            drag_colors = np.broadcast_to(drag_rgba, (len(drag_verts), 4)).copy() if len(drag_verts) else np.zeros((0, 4))
 
             if name not in self._mpl_model_collections:
                 # First render of this model: create collections
                 cope_coll = drag_coll = None
                 if len(cope_verts):
-                    cope_coll = Poly3DCollection(cope_verts, facecolors=cope_colors,
-                                                 edgecolors="none", linewidths=0, shade=True)
+                    cope_coll = Poly3DCollection(
+                        cope_verts, facecolors=cope_colors,
+                        edgecolors="none", linewidths=0, shade=False,
+                    )
                     self.ax.add_collection3d(cope_coll)
                 if len(drag_verts):
-                    drag_coll = Poly3DCollection(drag_verts, facecolors=drag_colors,
-                                                 edgecolors="none", linewidths=0, shade=True)
+                    drag_coll = Poly3DCollection(
+                        drag_verts, facecolors=drag_colors,
+                        edgecolors="none", linewidths=0, shade=False,
+                    )
                     self.ax.add_collection3d(drag_coll)
                 self._mpl_model_collections[name] = {"cope": cope_coll, "drag": drag_coll}
             else:
@@ -1832,8 +1838,12 @@ class Viewport3D(QWidget):
             self._add_pv_gating_mesh(faces, CHILL_COLOR, 0.9)
 
     def _draw_xray_points_mpl(self) -> None:
-        hot = np.asarray(self._sim_fields.get("hot_xyz") or np.zeros((0, 3)))
-        poro = np.asarray(self._sim_fields.get("porosity_xyz") or np.zeros((0, 3)))
+        hot = np.asarray(self._sim_fields.get("hot_xyz", np.zeros((0, 3))))
+        poro = np.asarray(self._sim_fields.get("porosity_xyz", np.zeros((0, 3))))
+        if hot.ndim != 2 or hot.shape[-1] != 3:
+            hot = np.zeros((0, 3))
+        if poro.ndim != 2 or poro.shape[-1] != 3:
+            poro = np.zeros((0, 3))
         if len(hot):
             self.ax.scatter(hot[:, 0], hot[:, 1], hot[:, 2], c="#FAB387", s=12, alpha=0.7)
         if len(poro):
@@ -1842,8 +1852,12 @@ class Viewport3D(QWidget):
     def _draw_xray_points_pv(self) -> None:
         if not self.use_pyvista:
             return
-        hot = np.asarray(self._sim_fields.get("hot_xyz") or np.zeros((0, 3)))
-        poro = np.asarray(self._sim_fields.get("porosity_xyz") or np.zeros((0, 3)))
+        hot = np.asarray(self._sim_fields.get("hot_xyz", np.zeros((0, 3))))
+        poro = np.asarray(self._sim_fields.get("porosity_xyz", np.zeros((0, 3))))
+        if hot.ndim != 2 or hot.shape[-1] != 3:
+            hot = np.zeros((0, 3))
+        if poro.ndim != 2 or poro.shape[-1] != 3:
+            poro = np.zeros((0, 3))
         if len(hot) >= 1:
             cloud = pv.PolyData(hot)
             self._pv_particle_actors.append(
@@ -1858,8 +1872,9 @@ class Viewport3D(QWidget):
     def set_solid_frac(self, frac: float) -> None:
         """Scrub solid fraction (0 = liquid, 1 = frozen). Feeding stops ~0.7."""
         self._solidify_frac = float(np.clip(frac, 0.0, 1.0))
-        self._solid_frac_label = True
-        self.render(max(self._anim_frac, 1.0 if self._solidify_frac > 0 else 0.0))
+        self._solid_frac_label = self._solidify_frac > 0
+        if self.models:
+            self.render(max(self._anim_frac, 1.0 if self._solidify_frac > 0 else 0.0))
 
     def place_gating(self, kind: str, x: float, y: float, z: float | None = None) -> None:
         """Drop sprue / gate / riser / chill at a clicked world XY."""
