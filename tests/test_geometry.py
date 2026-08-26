@@ -80,6 +80,8 @@ class TestGeometryStats:
         assert "surf_cm2" in s
         assert "z_min" in s
         assert "z_max" in s
+        assert "mesh_warnings" in s
+        assert "watertight" in s
 
     def test_unit_cube_z_extents(self):
         s = self._stats(unit_cube_mesh())
@@ -276,3 +278,52 @@ class TestHexToRgb:
         assert abs(r - 74/255)  < 1e-6
         assert abs(g - 144/255) < 1e-6
         assert abs(b - 217/255) < 1e-6
+
+
+class TestMeshTools:
+
+    def test_open_triangle_is_not_watertight(self):
+        from simulation.mesh_tools import inspect_mesh
+        tri = np.array([[[0, 0, 0], [1, 0, 0], [0, 1, 0]]], dtype=float)
+        q = inspect_mesh(tri)
+        assert q["watertight"] is False
+        assert q["boundary_edges"] == 3
+        assert any("watertight" in w.lower() for w in q["warnings"])
+
+    def test_closed_cube_has_no_boundary_edges(self):
+        from simulation.mesh_tools import inspect_mesh
+        q = inspect_mesh(unit_cube_mesh())
+        assert q["boundary_edges"] == 0
+        assert q["n_triangles"] == 12
+
+    def test_cluster_decimate_reduces_count(self):
+        from simulation.mesh_tools import cluster_decimate
+        many = np.concatenate([unit_cube_mesh() + i * 0.01 for i in range(4000)], axis=0)
+        assert len(many) > 25_000
+        out = cluster_decimate(many, max_tris=1000)
+        assert len(out) <= 1000
+        assert np.isfinite(out).all()
+
+    def test_cluster_decimate_noop_when_small(self):
+        from simulation.mesh_tools import cluster_decimate
+        cube = unit_cube_mesh()
+        out = cluster_decimate(cube, max_tris=25_000)
+        assert len(out) == len(cube)
+
+    def test_defect_sites_on_elongated_box(self):
+        from simulation.mesh_tools import find_defect_sites
+        # Wide thin plate + offset blob so extremities exist
+        plate = Viewport3D._make_box_mesh(0, 0, 0, 100, 10, 2)
+        blob = Viewport3D._make_box_mesh(0, 0, 2, 20, 20, 30)
+        mesh = np.concatenate([plate, blob], axis=0)
+        sites = find_defect_sites(mesh, sprue_xy=(-50.0, 0.0))
+        for key in ("shrinkage_risk", "cold_shut_risk", "misrun_risk"):
+            assert key in sites
+            assert len(sites[key]) == 3
+
+    def test_scale_geometry_powers(self):
+        from simulation.mesh_tools import scale_geometry
+        vol, surf, z = scale_geometry(100.0, 80.0, 50.0, 1.1)
+        assert abs(vol - 100.0 * 1.1 ** 3) < 1e-9
+        assert abs(surf - 80.0 * 1.1 ** 2) < 1e-9
+        assert abs(z - 55.0) < 1e-9

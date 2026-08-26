@@ -43,6 +43,7 @@ ui/
   main_window.py        # MainWindow — UI layout, signal wiring, event handlers
 simulation/
   worker.py             # SimWorker — physics calculations in a QThread
+  mesh_tools.py         # Mesh quality, clustering decimation, defect sites
 viewport/
   viewport.py           # Viewport3D — 3D rendering, STL loading, animation
 results/

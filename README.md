@@ -512,13 +512,15 @@ pip install pyinstaller
 build_exe.bat
 ```
 
-Output: `dist/SandCastingSim.exe`.
+Output: `dist/SandCastingSim/SandCastingSim.exe` (folder build — zip the whole folder).
 
-To build manually:
+GPU / PyVista build (much larger, includes VTK):
 
 ```bat
-pyinstaller --onefile --windowed --name SandCastingSim casting_sim.py
+build_gpu.bat
 ```
+
+Output: `dist/SandCastingSim_GPU/SandCastingSim.exe`.
 
 ---
 
@@ -532,7 +534,10 @@ sand_casting_v2/
 ├── README.md                   # This file
 ├── CLAUDE.md                   # Developer guide for Claude Code sessions
 ├── run.bat                     # Windows launcher (auto-installs deps)
-├── build_exe.bat               # PyInstaller build script (run on Windows)
+├── build_exe.bat               # PyInstaller CPU/folder build (run on Windows)
+├── build_gpu.bat               # PyInstaller PyVista/VTK GPU build (run on Windows)
+├── SandCastingSim.spec
+├── SandCastingSim_GPU.spec
 │
 ├── ui/
 │   ├── style.py                # APP_STYLE QSS (Catppuccin Mocha dark theme)
@@ -541,7 +546,8 @@ sand_casting_v2/
 │   └── demo_part.py            # build_demo_mesh() — procedural Motor Mount Bracket
 │
 ├── simulation/
-│   └── worker.py               # SimWorker — physics calculations in a QThread
+│   ├── worker.py               # SimWorker — physics calculations in a QThread
+│   └── mesh_tools.py           # Watertight check, clustering decimation, defect sites
 │
 ├── viewport/
 │   └── viewport.py             # Viewport3D — 3D rendering, STL loading, animation
@@ -563,17 +569,19 @@ sand_casting_v2/
   consistently oriented STL. Open or inverted meshes produce wrong geometry
   values.
 - **Uniform-stride decimation** — fine detail on complex meshes may be lost.
-  No edge-collapse or QEM simplification is implemented.
+  Vertex clustering is used first; a stride is only applied if the clustered
+  mesh is still over 25,000 triangles.
 - **Single parting line** — simple two-part cope/drag mould only. Multi-part
   moulds and sand cores are not modelled.
 - **Isothermal fill assumption** — metal is treated as a single-temperature
   incompressible fluid. Partial solidification during fill is captured only by
   the rule-based cold-shut warning.
-- **Fixed 100 mm sprue head** — the Bernoulli calculation uses a hard-coded
-  sprue height. Adjust `sprue_height_mm` in `_compute_fill_time_gating_hydraulics`
-  for very tall or short sprues.
-- **PyVista drag interaction** — interactive click-drag of gating components is
-  Matplotlib-only. In PyVista mode, use the Gating Placement sliders.
+- **Fixed 100 mm sprue head** — hydraulic head is the visible sprue height plus
+  cope height (part top down to the parting line). Edit **Sprue height** in the
+  Gating System panel.
+- **PyVista drag interaction** — click-drag of the sprue, riser, and model works
+  in both Matplotlib and PyVista. Camera rotate still uses the default VTK
+  interactor when you are not near a gating component.
 
 ---
 

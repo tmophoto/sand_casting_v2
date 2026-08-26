@@ -371,3 +371,11 @@ class TestRobustness:
         heavy = {**BASE_PARAMS, "vol_cm3": 2000.0, "surf_cm2": 600.0, "has_riser": False}
         r = run_sim(heavy)
         assert any("porosity" in w.lower() for w in r["warnings"])
+
+    def test_taller_sprue_head_increases_velocity(self):
+        gating = {"has_sprue": True, "sprue_top_r": 7.5, "sprue_bot_r": 4.0,
+                  "sprue_height_mm": 100.0}
+        r_low = run_sim({**BASE_PARAMS, "gating_params": gating})
+        r_hi = run_sim({**BASE_PARAMS, "gating_params": {**gating, "sprue_height_mm": 400.0}})
+        assert r_hi["fill_velocity_mm_s"] > r_low["fill_velocity_mm_s"]
+        assert r_hi["fill_time_s"] < r_low["fill_time_s"]

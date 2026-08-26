@@ -21,6 +21,9 @@ except ImportError:
     from matplotlib.figure import Figure
 from constants import (COPE_COLOR, DRAG_COLOR, SPRUE_COLOR, RUNNER_COLOR,
                        GATE_COLOR, RISER_COLOR, MODEL_COLORS, METAL_PBR)
+from simulation.mesh_tools import (
+    inspect_mesh, cluster_decimate, aabb_depths, find_defect_sites,
+)
 
 # Optional GPU array backend (falls back to NumPy transparently)
 try:
@@ -76,11 +79,13 @@ class Viewport3D(QWidget):
         # Gating dimensions (mm) — hydraulics must match the rendered mesh
         self.sprue_top_radius    = 7.5
         self.sprue_bottom_radius = 4.0
+        self.sprue_height        = 100.0
         self.runner_length       = 160.0
         self.runner_width        = 10.0   # cross-section depth
         self.runner_height       = 8.0    # cross-section height
         self.runner_diameter     = 12.0   # legacy circular approx; unused when width/height set
         self.gate_area           = 40.0
+        self.shrink_scale        = 1.0
 
 
         self.pour_rate: float  = 1.0
@@ -166,6 +171,7 @@ class Viewport3D(QWidget):
                 self.plotter.add_light(pv.Light(position=(0, -200, 250),
                                                 focal_point=(0, 0, 0),
                                                 intensity=0.15))
+                self._bind_pyvista_drag()
                 return
             except Exception:
                 pass
@@ -283,11 +289,7 @@ class Viewport3D(QWidget):
         _, unique_idx = np.unique(centroids, axis=0, return_index=True)
         vectors = vectors[unique_idx]
 
-        # Decimate: keep at most 25000 triangles
-        max_tris = 25_000
-        if len(vectors) > max_tris:
-            step    = math.ceil(len(vectors) / max_tris)
-            vectors = vectors[::step]
+        vectors = cluster_decimate(vectors, max_tris=25_000)
 
         loaded.vectors = vectors
 
@@ -334,7 +336,11 @@ class Viewport3D(QWidget):
 
         verts = xp.asarray(mesh.vectors)
         if verts.shape[0] == 0:
-            return {"vol_cm3": 0.0, "surf_cm2": 0.0, "z_min": 0.0, "z_max": 0.0}
+            return {
+                "vol_cm3": 0.0, "surf_cm2": 0.0, "z_min": 0.0, "z_max": 0.0,
+                "watertight": False, "inverted": False,
+                "mesh_warnings": ["Mesh has no triangles."],
+            }
 
         v0, v1, v2 = verts[:, 0], verts[:, 1], verts[:, 2]
 
@@ -343,11 +349,16 @@ class Viewport3D(QWidget):
 
         area_mm2 = float(xp.sum(xp.linalg.norm(cross, axis=1)) / 2.0)
 
+        quality = inspect_mesh(np.asarray(mesh.vectors, dtype=np.float64))
+
         return {
             "vol_cm3":  vol_mm3  / 1000.0,
             "surf_cm2": area_mm2 / 100.0,
             "z_min":    float(xp.min(verts[:, :, 2])),
             "z_max":    float(xp.max(verts[:, :, 2])),
+            "watertight": quality["watertight"],
+            "inverted":   quality["inverted"],
+            "mesh_warnings": quality["warnings"],
         }
 
 
@@ -368,9 +379,10 @@ class Viewport3D(QWidget):
 
         verts = self.models[name]["render_data"].reshape(-1, 3)
         cos_r, sin_r = math.cos(rot), math.sin(rot)
-        xs = verts[:, 0] * cos_r - verts[:, 1] * sin_r + off[0]
-        ys = verts[:, 0] * sin_r + verts[:, 1] * cos_r + off[1]
-        zs = verts[:, 2] + off[2]
+        s = float(self.shrink_scale)
+        xs = (verts[:, 0] * cos_r - verts[:, 1] * sin_r) * s + off[0]
+        ys = (verts[:, 0] * sin_r + verts[:, 1] * cos_r) * s + off[1]
+        zs = verts[:, 2] * s + off[2]
         return xs.min(), xs.max(), ys.min(), ys.max(), zs.min(), zs.max()
 
 
@@ -476,8 +488,10 @@ class Viewport3D(QWidget):
                     colls["drag"].set_verts(drag_verts)
                     colls["drag"].set_facecolor(drag_colors)
 
-            # Fill animation overlay (always an overlay; plasma heat colours)
-            if anim_frac > 0:
+            # Fill / solidification overlay
+            if self._solidify_frac > 0:
+                self._add_mpl_solidify_overlay(verts)
+            elif anim_frac > 0:
                 fill_z    = zmin + part_h * anim_frac
                 fill_mask = centroids_z <= fill_z
                 if np.any(fill_mask):
@@ -562,6 +576,9 @@ class Viewport3D(QWidget):
         if anim_frac > 0:
             for name, data in self.models.items():
                 verts = self._apply_transform(data["render_data"], self.transforms[name])
+                if self._solidify_frac > 0:
+                    self._add_pv_solidify_overlay(name, verts)
+                    continue
                 heat_colors = self._compute_heat_colors(verts, anim_frac)
                 centroids_z = verts[:, :, 2].mean(axis=1)
                 fill_z      = zmin + part_h * anim_frac
@@ -615,6 +632,8 @@ class Viewport3D(QWidget):
             round(self.runner_y_offset, 2),
             tuple(float(v) for v in self.riser_offset),
             self.sprue_top_radius, self.sprue_bottom_radius,
+            self.sprue_height, self.runner_width, self.runner_height,
+            self.runner_length, self.gate_area,
         )
         if gating_key != self._pv_gating_key:
             for a in self._pv_gating_actors:
@@ -715,27 +734,30 @@ class Viewport3D(QWidget):
             self.render(self._anim_frac)
 
     def _build_user_matrix(self, t: dict) -> np.ndarray:
-        """4×4 homogeneous transform (Z-rotation + XYZ offset) for PyVista actors."""
+        """4×4 homogeneous transform (scale + Z-rotation + XYZ offset)."""
         off = t["offset"]
         rot = math.radians(t["rotation"])
         cos_r, sin_r = math.cos(rot), math.sin(rot)
+        s = float(self.shrink_scale)
         mat = np.eye(4, dtype=np.float64)
-        mat[0, 0], mat[0, 1] =  cos_r, -sin_r
-        mat[1, 0], mat[1, 1] =  sin_r,  cos_r
+        mat[0, 0], mat[0, 1] =  s * cos_r, -s * sin_r
+        mat[1, 0], mat[1, 1] =  s * sin_r,  s * cos_r
+        mat[2, 2] = s
         mat[0, 3], mat[1, 3], mat[2, 3] = float(off[0]), float(off[1]), float(off[2])
         return mat
 
     def _apply_transform(self, render_data: np.ndarray, t: dict) -> np.ndarray:
-        """Return world-space vertex array by applying rotation + offset."""
+        """Return world-space vertex array (shrink scale, rotation, offset)."""
         verts = render_data.copy()
         off = t["offset"]
         rot = math.radians(t["rotation"])
         cos_r, sin_r = math.cos(rot), math.sin(rot)
-        x_new = verts[:, :, 0] * cos_r - verts[:, :, 1] * sin_r
-        y_new = verts[:, :, 0] * sin_r + verts[:, :, 1] * cos_r
+        s = float(self.shrink_scale)
+        x_new = (verts[:, :, 0] * cos_r - verts[:, :, 1] * sin_r) * s
+        y_new = (verts[:, :, 0] * sin_r + verts[:, :, 1] * cos_r) * s
         verts[:, :, 0] = x_new + off[0]
         verts[:, :, 1] = y_new + off[1]
-        verts[:, :, 2] += off[2]
+        verts[:, :, 2] = verts[:, :, 2] * s + off[2]
         return verts
 
     def _clear_mpl_overlays(self) -> None:
@@ -769,7 +791,7 @@ class Viewport3D(QWidget):
                 cx=sx, cy=sy, z_bottom=zmax,
                 r_bottom=self.sprue_bottom_radius,
                 r_top=self.sprue_top_radius,
-                height=100.0, sides=24,
+                height=self.sprue_height, sides=24,
             )
             self._add_pv_gating_mesh(faces, *_gating_colors["Tapered Sprue"])
 
@@ -833,6 +855,10 @@ class Viewport3D(QWidget):
             tuple(float(v) for v in self.riser_offset),
             self.sprue_top_radius,
             self.sprue_bottom_radius,
+            self.sprue_height,
+            self.runner_width,
+            self.runner_height,
+            self.runner_length,
         )
         if cache_key != self._gating_cache_key:
             self._gating_geo_cache.clear()
@@ -852,7 +878,7 @@ class Viewport3D(QWidget):
                     cx=sx, cy=sy, z_bottom=zmax,
                     r_bottom=self.sprue_bottom_radius,
                     r_top=self.sprue_top_radius,
-                    height=100.0, sides=24,
+                    height=self.sprue_height, sides=24,
                 )
                 colors = self._shade_faces(faces, self._hex_to_rgb(SPRUE_COLOR), alpha=0.85)
                 return faces, colors
@@ -922,7 +948,7 @@ class Viewport3D(QWidget):
             return
         sx, sy = self.sprue_offset
         _, _, _, _, zmin, zmax = self._compute_bounds()
-        top_z = zmax + 100
+        top_z = zmax + self.sprue_height
 
         np.random.seed(int(anim_frac * 1000) % 1000)
         n_particles = int(15 + anim_frac * 5)
@@ -953,7 +979,7 @@ class Viewport3D(QWidget):
             return
         sx, sy = self.sprue_offset
         _, _, _, _, zmin, zmax = self._compute_bounds()
-        top_z = zmax + 100
+        top_z = zmax + self.sprue_height
 
         np.random.seed(int(anim_frac * 1000) % 1000)
         n_particles = int(15 + anim_frac * 5)
@@ -1232,15 +1258,92 @@ class Viewport3D(QWidget):
         h = hex_color.lstrip("#")
         return tuple(int(h[i:i+2], 16) / 255.0 for i in (0, 2, 4))
 
+    def _metal_rgb(self) -> tuple:
+        pbr = METAL_PBR.get(self.active_metal, {})
+        return self._hex_to_rgb(pbr.get("color", "#C8C8C8"))
 
+    def _add_mpl_solidify_overlay(self, verts: np.ndarray) -> None:
+        """Surface-first freeze: shallow AABB-depth faces solidify first."""
+        depths = aabb_depths(verts)
+        if len(depths) == 0:
+            return
+        dmax = max(float(depths.max()), 1e-9)
+        frozen = (depths / dmax) <= self._solidify_frac
+        heat = self._compute_heat_colors(verts, 1.0)
+        metal = np.array(self._metal_rgb() + (1.0,))
+        colors = np.array(heat)
+        colors[frozen] = metal
+        self.ax.add_collection3d(
+            Poly3DCollection(verts, facecolors=colors, edgecolors="none")
+        )
+
+    def _add_pv_solidify_overlay(self, name: str, verts: np.ndarray) -> None:
+        depths = aabb_depths(verts)
+        if len(depths) == 0:
+            return
+        dmax = max(float(depths.max()), 1e-9)
+        frozen = (depths / dmax) <= self._solidify_frac
+        heat = self._compute_heat_colors(verts, 1.0)[:, :3]
+        metal = np.array(self._metal_rgb())
+        rgb = np.array(heat)
+        rgb[frozen] = metal
+        n_f = len(verts)
+        ff = np.hstack([np.full((n_f, 1), 3), np.arange(n_f * 3).reshape(-1, 3)])
+        fmesh = PolyData(verts.reshape(-1, 3), ff.flatten())
+        actor = self.plotter.add_mesh(
+            fmesh, scalars=rgb, rgb=True, smooth_shading=True,
+        )
+        self._pv_actors[name]["fill"] = actor
+
+    def set_shrink_scale(self, scale: float) -> None:
+        self.shrink_scale = max(1.0, min(1.15, float(scale)))
+        self.render(self._anim_frac)
+
+    def set_gating_dimensions(
+        self,
+        sprue_top_r: float | None = None,
+        sprue_bot_r: float | None = None,
+        sprue_height: float | None = None,
+        runner_width: float | None = None,
+        runner_height: float | None = None,
+        gate_area: float | None = None,
+    ) -> None:
+        if sprue_top_r is not None:
+            self.sprue_top_radius = float(sprue_top_r)
+        if sprue_bot_r is not None:
+            self.sprue_bottom_radius = float(sprue_bot_r)
+        if sprue_height is not None:
+            self.sprue_height = float(sprue_height)
+        if runner_width is not None:
+            self.runner_width = float(runner_width)
+        if runner_height is not None:
+            self.runner_height = float(runner_height)
+        if gate_area is not None:
+            self.gate_area = float(gate_area)
+        self.render(self._anim_frac)
+
+    def defect_sites(self) -> dict:
+        """World-space defect marker positions derived from loaded meshes."""
+        chunks = [
+            self._apply_transform(data["render_data"], self.transforms[name])
+            for name, data in self.models.items()
+        ]
+        if not chunks:
+            return {}
+        return find_defect_sites(
+            np.concatenate(chunks, axis=0),
+            sprue_xy=(float(self.sprue_offset[0]), float(self.sprue_offset[1])),
+        )
+
+    def screenshot(self, path: str) -> None:
+        if self.use_pyvista:
+            self.plotter.screenshot(path)
+        else:
+            self.fig.savefig(path, facecolor=self.fig.get_facecolor(), dpi=120)
 
     # ------------------------------------------------------------------
-
     # Transform setters
-
     # ------------------------------------------------------------------
-
-
 
     def set_transformation(self, dx: float, dy: float, dz: float, rot_z: float) -> None:
         if not self.active_model or self.active_model not in self.transforms:
@@ -1327,16 +1430,23 @@ class Viewport3D(QWidget):
         has_gate   = any(c in self.gating for c in ["Fan Gate"])
 
 
+        xmin, xmax, ymin, ymax, zmin, zmax = self._compute_bounds()
+        part_h = max(zmax - zmin, 1.0)
+        z_part = zmin + part_h * self.parting_z
+        cope_mm = max(0.0, zmax - z_part)
+        head_mm = self.sprue_height + cope_mm
+
         return {
-            "has_sprue":       has_sprue,
-            "has_runner":      has_runner,
-            "has_gate":        has_gate,
-            "sprue_top_r":     self.sprue_top_radius if has_sprue else None,
-            "sprue_bot_r":     self.sprue_bottom_radius if has_sprue else None,
-            "runner_dia":      self.runner_diameter if has_runner else None,
-            "runner_width_mm": self.runner_width if has_runner else None,
+            "has_sprue":        has_sprue,
+            "has_runner":       has_runner,
+            "has_gate":         has_gate,
+            "sprue_top_r":      self.sprue_top_radius if has_sprue else None,
+            "sprue_bot_r":      self.sprue_bottom_radius if has_sprue else None,
+            "sprue_height_mm":  head_mm,
+            "runner_dia":       self.runner_diameter if has_runner else None,
+            "runner_width_mm":  self.runner_width if has_runner else None,
             "runner_height_mm": self.runner_height if has_runner else None,
-            "gate_area_mm2":   self.gate_area if has_gate else None,
+            "gate_area_mm2":    self.gate_area if has_gate else None,
         }
 
 
@@ -1356,6 +1466,124 @@ class Viewport3D(QWidget):
     # ------------------------------------------------------------------
 
 
+
+    def _bind_pyvista_drag(self) -> None:
+        """Left-drag sprue, riser, or the active model in the PyVista view."""
+        try:
+            iren = self.plotter.iren
+            interactor = getattr(iren, "interactor", iren)
+            interactor.AddObserver("LeftButtonPressEvent", self._on_pv_press)
+            interactor.AddObserver("MouseMoveEvent", self._on_pv_move)
+            interactor.AddObserver("LeftButtonReleaseEvent", self._on_pv_release)
+        except Exception:
+            pass
+
+    def _pv_event_xy(self, obj) -> tuple[int, int] | None:
+        try:
+            x, y = obj.GetEventPosition()
+            return int(x), int(y)
+        except Exception:
+            return None
+
+    def _pv_world_on_plane(self, x: int, y: int, z_plane: float) -> np.ndarray | None:
+        """Intersect the camera ray through display (x, y) with z = z_plane."""
+        try:
+            renderer = self.plotter.renderer
+            renderer.SetDisplayPoint(x, y, 0.0)
+            renderer.DisplayToWorld()
+            near = np.array(renderer.GetWorldPoint()[:3], dtype=float)
+            renderer.SetDisplayPoint(x, y, 1.0)
+            renderer.DisplayToWorld()
+            far = np.array(renderer.GetWorldPoint()[:3], dtype=float)
+            d = far - near
+            if abs(d[2]) < 1e-9:
+                return np.array([near[0], near[1], z_plane])
+            t = (z_plane - near[2]) / d[2]
+            p = near + t * d
+            return p
+        except Exception:
+            return None
+
+    def _on_pv_press(self, obj, event) -> None:
+        xy = self._pv_event_xy(obj)
+        if xy is None or not self.models:
+            return
+        xmin, xmax, ymin, ymax, zmin, zmax = self._compute_bounds()
+        part_h = max(zmax - zmin, 1.0)
+        z_part = zmin + part_h * self.parting_z
+        hit = self._pv_world_on_plane(xy[0], xy[1], z_part)
+        if hit is None:
+            return
+        thresh = 25.0
+        if "Tapered Sprue" in self.gating:
+            sx, sy = self.sprue_offset
+            if math.hypot(hit[0] - sx, hit[1] - sy) < thresh:
+                self._dragging_part = "sprue"
+                self._drag_last = (hit[0], hit[1])
+                try:
+                    obj.AbortFlagOn()
+                except Exception:
+                    pass
+                return
+        if "Riser (Open)" in self.gating:
+            rx, ry = self.riser_offset
+            if math.hypot(hit[0] - rx, hit[1] - ry) < thresh:
+                self._dragging_part = "riser"
+                self._drag_last = (hit[0], hit[1])
+                try:
+                    obj.AbortFlagOn()
+                except Exception:
+                    pass
+                return
+        if self.active_model and self.active_model in self.transforms:
+            self._dragging_part = "model"
+            self._drag_last = (hit[0], hit[1])
+
+    def _on_pv_move(self, obj, event) -> None:
+        if not self._dragging_part:
+            return
+        xy = self._pv_event_xy(obj)
+        if xy is None:
+            return
+        xmin, xmax, ymin, ymax, zmin, zmax = self._compute_bounds()
+        part_h = max(zmax - zmin, 1.0)
+        z_part = zmin + part_h * self.parting_z
+        hit = self._pv_world_on_plane(xy[0], xy[1], z_part)
+        if hit is None or self._drag_last is None:
+            return
+        dmm_x = hit[0] - self._drag_last[0]
+        dmm_y = hit[1] - self._drag_last[1]
+        self._drag_last = (hit[0], hit[1])
+        if self._dragging_part == "sprue":
+            self.sprue_offset += np.array([dmm_x, dmm_y])
+            self.render(self._anim_frac)
+            self.gating_moved.emit({
+                "sprue_x": float(self.sprue_offset[0]),
+                "sprue_y": float(self.sprue_offset[1]),
+                "riser_x": float(self.riser_offset[0]),
+                "riser_y": float(self.riser_offset[1]),
+            })
+        elif self._dragging_part == "riser":
+            self.riser_offset += np.array([dmm_x, dmm_y])
+            self.render(self._anim_frac)
+            self.gating_moved.emit({
+                "sprue_x": float(self.sprue_offset[0]),
+                "sprue_y": float(self.sprue_offset[1]),
+                "riser_x": float(self.riser_offset[0]),
+                "riser_y": float(self.riser_offset[1]),
+            })
+        elif self._dragging_part == "model" and self.active_model:
+            t = self.transforms[self.active_model]
+            t["offset"] = t["offset"] + np.array([dmm_x, dmm_y, 0.0])
+            self.render(self._anim_frac)
+        try:
+            obj.AbortFlagOn()
+        except Exception:
+            pass
+
+    def _on_pv_release(self, obj, event) -> None:
+        self._dragging_part = None
+        self._drag_last = None
 
     def _on_mouse_press(self, event):
         if event.inaxes != self.ax:
@@ -1548,7 +1776,7 @@ class Viewport3D(QWidget):
 
         self._solidify_step += 1
         self._solidify_frac  = self._solidify_step / self._solidify_steps
-        self.render(max(self._anim_frac, 1.0 if self._solidify_step else self._solidify_frac))
+        self.render(1.0)
         if self._solidify_step >= self._solidify_steps:
             self._solidify_frac = 0.0
             if self._solidify_done_cb:

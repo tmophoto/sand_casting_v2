@@ -55,8 +55,10 @@ class SimWorker(QObject):
         if effective_area_mm2 <= 0:
             return max(3.0, vol_cm3 / 80.0), "fallback", 0.0
 
+        head_mm = float(gating.get("sprue_height_mm") or _SPRUE_HEIGHT_MM)
+        head_mm = max(10.0, head_mm)
         # v = Cd √(2gh)  → mm/s; Q = A × v  → mm³/s; convert to cm³/s for volume
-        fill_velocity_mm_s = _DISCHARGE_CD * math.sqrt(2.0 * _G_MM_S2 * _SPRUE_HEIGHT_MM)
+        fill_velocity_mm_s = _DISCHARGE_CD * math.sqrt(2.0 * _G_MM_S2 * head_mm)
         flow_rate_cm3_s = (effective_area_mm2 * fill_velocity_mm_s) / 1000.0
         fill_time_s = vol_cm3 / flow_rate_cm3_s
         return max(1.5, fill_time_s), restrictive_elem, fill_velocity_mm_s

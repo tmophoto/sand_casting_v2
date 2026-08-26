@@ -12,6 +12,7 @@ from viewport.viewport import Viewport3D
 from simulation.worker import SimWorker
 from results.formatter import build_results_text
 from constants import METAL_DEFAULTS, FLASK_SIZES, shrink_scale_from_slider
+from simulation.mesh_tools import scale_geometry
 
 
 class MainWindow(QMainWindow):
@@ -133,6 +134,32 @@ class MainWindow(QMainWindow):
             cb = QCheckBox(comp)
             self.gating_checkboxes[comp] = cb
             gating_layout.addWidget(cb)
+
+        gating_layout.addWidget(QLabel("Dimensions (mm)"))
+        self.sprue_top_slider, self.sprue_top_label = self._mm_slider(
+            gating_layout, "Sprue top r", 4, 20, 8,
+            "Tapered sprue radius at the pouring basin (mm).",
+        )
+        self.sprue_bot_slider, self.sprue_bot_label = self._mm_slider(
+            gating_layout, "Sprue exit r", 2, 12, 4,
+            "Tapered sprue radius at the runner (mm). This is usually the choke.",
+        )
+        self.sprue_h_slider, self.sprue_h_label = self._mm_slider(
+            gating_layout, "Sprue height", 40, 250, 100,
+            "Visible sprue length. Hydraulic head also includes cope height.",
+        )
+        self.runner_w_slider, self.runner_w_label = self._mm_slider(
+            gating_layout, "Runner width", 4, 24, 10,
+            "Horizontal runner cross-section width (mm).",
+        )
+        self.runner_h_slider, self.runner_h_label = self._mm_slider(
+            gating_layout, "Runner height", 4, 20, 8,
+            "Horizontal runner cross-section height (mm).",
+        )
+        self.gate_area_slider, self.gate_area_label = self._mm_slider(
+            gating_layout, "Gate area", 10, 200, 40,
+            "Fan-gate hydraulic area (mm²).",
+        )
         # Add container widget (not layout) to panel
         gating_panel.content_layout.addWidget(gating_container)
         left_panel.addWidget(gating_panel)
@@ -330,9 +357,12 @@ class MainWindow(QMainWindow):
         self.sim_btn.setObjectName("sim_btn")
         self.reset_btn = QPushButton("Reset")
         self.reset_btn.setObjectName("reset_btn")
+        self.export_btn = QPushButton("Export…")
+        self.export_btn.setToolTip("Save results as HTML or PDF, plus a viewport screenshot.")
         btn_layout = QHBoxLayout()
         btn_layout.addWidget(self.sim_btn)
         btn_layout.addWidget(self.reset_btn)
+        btn_layout.addWidget(self.export_btn)
         right_panel.addLayout(btn_layout)
         splitter.addWidget(right_widget)
 
@@ -341,6 +371,29 @@ class MainWindow(QMainWindow):
 
         # Store reference to main layout for potential updates
         self._main_layout = main_layout
+
+    def _mm_slider(self, layout, title, vmin, vmax, value, tooltip=""):
+        lab = QLabel(f"{title}: {value}")
+        sl = QSlider(Qt.Orientation.Horizontal)
+        sl.setMinimum(vmin)
+        sl.setMaximum(vmax)
+        sl.setValue(value)
+        if tooltip:
+            sl.setToolTip(tooltip)
+        sl.valueChanged.connect(lambda v, l=lab, t=title: l.setText(f"{t}: {v}"))
+        layout.addWidget(lab)
+        layout.addWidget(sl)
+        return sl, lab
+
+    def _on_gating_dims(self) -> None:
+        self.viewport.set_gating_dimensions(
+            sprue_top_r=self.sprue_top_slider.value(),
+            sprue_bot_r=self.sprue_bot_slider.value(),
+            sprue_height=self.sprue_h_slider.value(),
+            runner_width=self.runner_w_slider.value(),
+            runner_height=self.runner_h_slider.value(),
+            gate_area=self.gate_area_slider.value(),
+        )
 
 
 
@@ -384,6 +437,7 @@ class MainWindow(QMainWindow):
 
         # Reset button
         self.reset_btn.clicked.connect(self._on_reset)
+        self.export_btn.clicked.connect(self._on_export)
 
 
         # Model placement sliders - X, Y, Z, Rotation
@@ -440,8 +494,17 @@ class MainWindow(QMainWindow):
             pct = METAL_DEFAULTS[self.metal_combo.currentText()]["shrinkage_pct"]
             scale = shrink_scale_from_slider(val)
             self.shrink_label.setText(f"Shrinkage: {pct}%  ·  scale ×{scale:.3f}")
+            self.viewport.set_shrink_scale(scale)
 
         self.shrink_slider.valueChanged.connect(update_shrink_label)
+        self.viewport.set_shrink_scale(shrink_scale_from_slider(self.shrink_slider.value()))
+
+        for sl in (
+            self.sprue_top_slider, self.sprue_bot_slider, self.sprue_h_slider,
+            self.runner_w_slider, self.runner_h_slider, self.gate_area_slider,
+        ):
+            sl.valueChanged.connect(lambda _v: self._on_gating_dims())
+        self._on_gating_dims()
 
 
         # Viewport gating moved signal
@@ -483,12 +546,20 @@ class MainWindow(QMainWindow):
         if filename:
             try:
                 stats = self.viewport.load_stl(filename)
+                warn = stats.get("mesh_warnings") or []
+                extra = ("\n⚠ " + " ".join(warn)) if warn else ""
                 self.stl_label.setText(
                     f"Loaded: {filename}\n"
                     f"Volume: {stats['vol_cm3']:.2f} cm\u00b3\n"
                     f"Surface: {stats['surf_cm2']:.2f} cm\u00b2"
+                    f"{extra}"
                 )
                 self._geometry_stats = stats
+                if warn:
+                    QMessageBox.warning(
+                        self, "Mesh quality",
+                        "This STL may not be a closed solid:\n\n" + "\n".join(warn)
+                    )
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load STL:\n{str(e)}")
 
@@ -572,6 +643,7 @@ class MainWindow(QMainWindow):
         scale_val = shrink_scale_from_slider(self.shrink_slider.value())
         self.shrink_label.setText(f"Shrinkage: {shrink_pct}%  ·  scale ×{scale_val:.3f}")
         self.viewport.set_active_metal(metal_name)
+        self.viewport.set_shrink_scale(scale_val)
 
     def _on_flask_changed(self, text: str) -> None:
         """Handle flask size combo box change."""
@@ -601,6 +673,13 @@ class MainWindow(QMainWindow):
         # Gather all parameters
         metal_name = self.metal_combo.currentText()
         metal_params = METAL_DEFAULTS[metal_name]
+        scale = shrink_scale_from_slider(self.shrink_slider.value())
+        vol, surf, z_max = scale_geometry(
+            self._geometry_stats.get("vol_cm3", 100.0),
+            self._geometry_stats.get("surf_cm2", 120.0),
+            self._geometry_stats.get("z_max", 100.0),
+            scale,
+        )
         params = {
             'metal': metal_name,
             'pour_temp_f': self.pour_spin.value(),
@@ -608,13 +687,13 @@ class MainWindow(QMainWindow):
             'thin_wall': self.thin_combo.currentIndex() == 1,
             'shrinkage': metal_params['shrinkage_pct'],
             'gate_types': [name for name, cb in self.gating_checkboxes.items() if cb.isChecked()],
-            'vol_cm3': self._geometry_stats.get('vol_cm3', 100.0),
-            'surf_cm2': self._geometry_stats.get('surf_cm2', 120.0),
+            'vol_cm3': vol,
+            'surf_cm2': surf,
             'has_riser': 'Riser (Open)' in self.viewport.gating,
             'gating_params': self.viewport.get_gating_params(),
             'runner_y_offset': self.viewport.runner_y_offset,
-            'shrink_scale': shrink_scale_from_slider(self.shrink_slider.value()),
-            'z_max': self._geometry_stats.get('z_max', 100.0),
+            'shrink_scale': scale,
+            'z_max': z_max,
         }
         # Run simulation in a thread
         self.progress_bar.setVisible(True)
@@ -647,22 +726,27 @@ class MainWindow(QMainWindow):
             # Decorate defects for drawing
             defects = result.get("defects", [])
             warnings = result.get("warnings", [])
+            sites = self.viewport.defect_sites()
             decorated_defects = []
-            z_marker = result.get("z_max", self._geometry_stats.get("z_max", 100))
+
+            def _site(kind: str):
+                xyz = sites.get(kind) or (0.0, 0.0, result.get("z_max", 100))
+                return (kind, float(xyz[0]), float(xyz[1]), float(xyz[2]))
+
             for d in defects:
                 if isinstance(d, tuple):
                     decorated_defects.append(d)
                 elif "shrinkage" in d.lower() or "porosity" in d.lower():
-                    decorated_defects.append(("shrinkage_risk", 0, 0, z_marker))
+                    decorated_defects.append(_site("shrinkage_risk"))
                 elif "cold" in d.lower():
-                    decorated_defects.append(("cold_shut_risk", 0, 0, z_marker))
+                    decorated_defects.append(_site("cold_shut_risk"))
                 elif "misrun" in d.lower():
-                    decorated_defects.append(("misrun_risk", 0, 0, z_marker))
+                    decorated_defects.append(_site("misrun_risk"))
                 else:
                     decorated_defects.append(d)
             for w in warnings:
                 if "porosity" in w.lower() or "shrinkage" in w.lower():
-                    decorated_defects.append(("shrinkage_risk", 0, 0, z_marker))
+                    decorated_defects.append(_site("shrinkage_risk"))
             # Start animations with draw_defect_markers as final callback
             duration = max(2.0, result.get("fill_time_s", 3.0))
             vsr = result.get("vsr", 1.0)
@@ -699,6 +783,53 @@ class MainWindow(QMainWindow):
             cb.setChecked(False)
         self.results_text.setText("")
         self._last_result = None
+
+    def _on_export(self) -> None:
+        """Save results HTML/PDF and a viewport screenshot."""
+        if not self._last_result:
+            QMessageBox.information(self, "Export", "Run a simulation first.")
+            return
+        path, selected = QFileDialog.getSaveFileName(
+            self, "Export results", "casting_results.html",
+            "HTML (*.html);;PDF (*.pdf);;PNG screenshot (*.png)",
+        )
+        if not path:
+            return
+        html = build_results_text(self._last_result)
+        lower = path.lower()
+        try:
+            if lower.endswith(".png") or "PNG" in selected:
+                if not lower.endswith(".png"):
+                    path += ".png"
+                self.viewport.screenshot(path)
+            elif lower.endswith(".pdf") or "PDF" in selected:
+                if not lower.endswith(".pdf"):
+                    path += ".pdf"
+                from PyQt6.QtGui import QTextDocument
+                from PyQt6.QtPrintSupport import QPrinter
+                printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+                printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+                printer.setOutputFileName(path)
+                doc = QTextDocument()
+                doc.setHtml(html)
+                doc.print(printer)
+                try:
+                    self.viewport.screenshot(path[:-4] + ".png")
+                except Exception:
+                    pass
+            else:
+                if not lower.endswith(".html"):
+                    path += ".html"
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(html)
+                try:
+                    self.viewport.screenshot(path.rsplit(".", 1)[0] + ".png")
+                except Exception:
+                    pass
+        except Exception as e:
+            QMessageBox.critical(self, "Export failed", str(e))
+            return
+        QMessageBox.information(self, "Export", f"Saved:\n{path}")
 
     def closeEvent(self, event) -> None:
         """Stop a running simulation thread before the window closes."""
