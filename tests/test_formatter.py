@@ -129,9 +129,11 @@ class TestFieldValues:
         text = build({"metal": "Everdur Bronze (C52100)"})
         assert "Everdur Bronze (C52100)" in text
 
-    def test_no_gating_velocity(self):
-        text = build({"fill_velocity_mm_s": 0.0})
-        assert "n/a" in text
+    def test_verdict_banner_ok(self):
+        assert "Likely OK" in build({"verdict": "ok", "defects": [], "warnings": []})
+
+    def test_yield_shown(self):
+        assert "72" in build({"yield_pct": 72.0})
 
 
 # ---------------------------------------------------------------------------

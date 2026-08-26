@@ -33,25 +33,23 @@ in a real-time 3D viewer.
 
 ## Features
 
-- **One-click demo** — pre-built Motor Mount Bracket with all settings
-  configured; press **▶ Try Demo** then **Simulate Pour** to see the full
-  simulation without loading any files
+- **One-click demo** — pre-built Motor Mount Bracket; **▶ Try Demo** lives on the top bar
 - **STL import** with automatic mesh cleanup — degenerate triangle removal,
   winding repair, QEM decimation to 25,000 triangles, and thin-wall detection
-- **Real-time 3D viewer** — GPU-accelerated via PyVista/OpenGL with PBR
-  materials, SSAO, and shadow rendering; software fallback via Matplotlib
-- **Multi-model scene** — load and position several STL parts simultaneously
-- **Gating system** — place tapered sprue, horizontal runner, fan gate, and open
-  riser; drag them interactively in the 3D viewport or use placement sliders
-- **Fill animation** — animated metal pour with per-triangle heat colouring and
-  a particle stream from the sprue (120 smooth steps)
-- **Solidification animation** — solidification front sweeps inward after fill
-  completes (120 smooth steps)
-- **Physics simulation** (runs in a background thread so the UI stays responsive):
-  - Solidification time via Chvorinov's Rule
-  - Fill time via Bernoulli gating hydraulics using the most-restrictive
-    cross-section
-  - Defect risk detection: misrun, cold shut, burn-on, low superheat
+- **Top-bar workflow** — Load, Simulate, Save/Open `.cast.json` sessions, recents, Undo (Ctrl+Z)
+- **Gating as a layout tool** — click a piece in 3D to edit it; snap to the part silhouette;
+  1:2:2 / 1:4:4 area-ratio presets; choke ring at the restrictive section
+- **Fill animation** — metal spreads from the gate (distance order), with a fill/solidify clock
+- **Solidification animation** — freeze order follows local wall thickness (thin first)
+- **Physics simulation** (background thread):
+  - Solidification time via Chvorinov's Rule (metal properties × mould type)
+  - Fill time via Bernoulli gating hydraulics using the most-restrictive cross-section
+  - Casting yield and melt mass including gating metal
+  - Riser modulus check vs hot-spot V/A
+  - Defect risk detection: misrun, cold shut, burn-on, low superheat, flask overflow
+- **Actionable results** — Likely OK / Risky / Will probably fail, with click-to-fly fixes
+- **Foundry checks** — draft overlay, undercut/core-print overlay, auto flask fit
+- **Pattern vs as-cast** — shrinkage scale with a toggle to preview the frozen part
 - **Defect markers** — coloured spheres rendered at risk locations after simulation
 - **Shrinkage compensation** — configurable scale factor per metal
 - **GPU array acceleration** — CuPy replaces NumPy transparently on CUDA GPUs;

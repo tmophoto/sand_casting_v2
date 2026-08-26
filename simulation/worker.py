@@ -1,6 +1,10 @@
 import math
 from PyQt6.QtCore import QObject, pyqtSignal
 from constants import METAL_DEFAULTS
+from simulation.foundry import (
+    mold_factor, gating_volumes_cm3, casting_yield_pct, riser_ok,
+    verdict_from_result, suggested_fixes,
+)
 
 
 def volumetric_heat_j_cm3(metal: dict, pour_f: float) -> float:
@@ -114,7 +118,8 @@ class SimWorker(QObject):
         vsr = vol_cm3 / surf_cm2
 
         self.progress.emit(30, "Applying Chvorinov Rule")
-        B = chvorinov_B(metal, pour_f)
+        mold_name = p.get("mold_type", "Green sand")
+        B = chvorinov_B(metal, pour_f) * mold_factor(mold_name)
         t_solidify_min = B * (vsr ** 2)
 
         self.progress.emit(50, "Checking defect risks")
@@ -141,6 +146,35 @@ class SimWorker(QObject):
             self._compute_fill_time_gating_hydraulics(vol_cm3, gating_params)
         )
 
+        gating_vols = gating_volumes_cm3({
+            **gating_params,
+            "has_riser": has_riser or gating_params.get("has_riser"),
+        })
+        gating_cm3 = gating_vols["total"]
+        yield_pct = casting_yield_pct(vol_cm3, gating_cm3)
+        pour_mass_g = (vol_cm3 + gating_cm3) * float(metal["density"])
+        part_mass_g = vol_cm3 * float(metal["density"])
+
+        riser = riser_ok(vsr, has_riser)
+        if riser["needed"] and not has_riser:
+            if not any("riser" in w.lower() or "porosity" in w.lower() for w in warnings):
+                warnings.append(
+                    "Porosity risk — thick section with no riser; add Riser (Open) to feed shrinkage"
+                )
+        elif has_riser and not riser["adequate"]:
+            warnings.append(
+                f"Riser may freeze before the hot spot — feeder modulus "
+                f"{riser['m_riser_cm']:.2f} cm < {riser['m_need_cm']:.2f} cm needed"
+            )
+
+        flask_info = p.get("flask_fit") or {}
+        if flask_info.get("fits") is False:
+            sug = flask_info.get("suggested") or "a larger flask"
+            warnings.append(
+                f"Flask is too small for the part + {flask_info.get('need_w_in', 0):.1f}×"
+                f"{flask_info.get('need_d_in', 0):.1f} in envelope — try {sug}"
+            )
+
         self.progress.emit(90, "Assembling results")
 
         cooling_rate = superheat / t_solidify_min if t_solidify_min > 0 else 0.0
@@ -151,19 +185,19 @@ class SimWorker(QObject):
                 f"({t_solidify_min * 60:.0f}s) — increase gating area or pour temp"
             )
 
-        if vsr > 1.5 and t_solidify_min > 5.0 and not has_riser:
-            warnings.append(
-                "Porosity risk — thick section with no riser; add Riser (Open) to feed shrinkage"
-            )
-
         shrink_scale = p.get("shrink_scale", 1.0 + (metal["shrinkage_pct"] / 100.0))
         z_max = p.get("z_max", 100.0)
-        pour_mass_g = vol_cm3 * float(metal["density"])
 
         result = {
             "t_solidify_min": t_solidify_min,
             "chvorinov_B": B,
             "pour_mass_g": pour_mass_g,
+            "part_mass_g": part_mass_g,
+            "gating_cm3": gating_cm3,
+            "gating_volumes": gating_vols,
+            "yield_pct": yield_pct,
+            "mold_type": mold_name,
+            "riser": riser,
             "fill_time_s": fill_time_s,
             "fill_velocity_mm_s": fill_velocity_mm_s,
             "fill_possible": fill_possible,
@@ -182,6 +216,8 @@ class SimWorker(QObject):
             "shrink_scale": shrink_scale,
             "z_max": z_max,
         }
+        result["verdict"] = verdict_from_result(result)
+        result["fixes"] = suggested_fixes(result, gating_params)
 
         self.progress.emit(100, "Done.")
         self.finished.emit(result)

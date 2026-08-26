@@ -299,6 +299,7 @@ class TestResultDict:
         "vsr", "vol_cm3", "surf_cm2", "superheat",
         "defects", "warnings", "metal", "pour_f", "mold_f", "shrink_scale",
         "min_superheat_f", "z_max", "pour_mass_g", "chvorinov_B",
+        "verdict", "fixes", "yield_pct", "mold_type",
     }
 
     def test_all_keys_present(self):

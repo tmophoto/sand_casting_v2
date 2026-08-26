@@ -44,6 +44,8 @@ ui/
 simulation/
   worker.py             # SimWorker — physics calculations in a QThread
   mesh_tools.py         # Mesh quality, QEM decimation, local thickness, defect sites
+  foundry.py            # Yield, riser modulus, draft, flask fit, verdicts
+  session.py            # Save/load .cast.json and recent files
 viewport/
   viewport.py           # Viewport3D — 3D rendering, STL loading, animation
 results/
@@ -83,14 +85,14 @@ ui/main_window ← casting_sim
 ## Physics
 
 - **Solidification time** — Chvorinov's Rule: `t = B × (V/A)²`
-  where `B = 3.0 × mold_constant × (H/H_A356) × (k_A356/k)`. `H` is volumetric
-  enthalpy from pour through freeze using density, specific heat, and latent heat.
-  A356 at its catalogue pour temperature has a thermal factor of 1.
+  where `B = 3.0 × mold_constant × (H/H_A356) × (k_A356/k) × mold_factor`.
+  `mold_factor` is 1.00 green sand, 1.15 dry sand, 0.85 resin/no-bake.
 - **Fill time** — Bernoulli gating hydraulics using the most restrictive cross-section.
   Falls back to `max(3.0 s, volume_cm³ / 80.0)` when no gating is configured.
-- **Defect detection** — rule-based checks for misrun, cold shut, burn-on, and low
-  superheat against configurable thresholds. Thin walls can be auto-detected from
-  local mesh thickness (< 6 mm).
+- **Yield** — melt mass is part + gating metal; casting yield is part / total.
+- **Riser** — open-riser modulus must exceed 1.2 × part V/A on heavy sections.
+- **Defect detection** — misrun, cold shut, burn-on, low superheat, flask overflow,
+  plus Auto thin-wall from local mesh thickness (< 6 mm).
 
 ## Metals
 
