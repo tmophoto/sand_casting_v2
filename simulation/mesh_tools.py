@@ -432,6 +432,49 @@ def min_wall_mm(vectors: np.ndarray) -> float:
     return float(np.min(t))
 
 
+def transform_triangles(
+    vectors: np.ndarray,
+    *,
+    offset: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
+    rotation_deg: float = 0.0,
+    scale: float = 1.0,
+) -> np.ndarray:
+    """Rotate about +Z, uniformly scale, then translate.
+
+    Used for as-cast vs pattern/cavity worlds. Callers pass the scale they
+    want exactly once — never stack this on a mesh that is already scaled.
+    """
+    verts = np.asarray(vectors, dtype=np.float64)
+    if verts.size == 0:
+        return verts.reshape(0, 3, 3).copy()
+    verts = verts.copy()
+    rot = math.radians(float(rotation_deg))
+    cos_r, sin_r = math.cos(rot), math.sin(rot)
+    s = float(scale)
+    off = np.asarray(offset, dtype=np.float64)
+    x_new = (verts[:, :, 0] * cos_r - verts[:, :, 1] * sin_r) * s
+    y_new = (verts[:, :, 0] * sin_r + verts[:, :, 1] * cos_r) * s
+    verts[:, :, 0] = x_new + float(off[0])
+    verts[:, :, 1] = y_new + float(off[1])
+    verts[:, :, 2] = verts[:, :, 2] * s + float(off[2])
+    return verts
+
+
+def rescale_world_point(
+    xyz: np.ndarray,
+    *,
+    offset: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
+    from_scale: float,
+    to_scale: float,
+) -> np.ndarray:
+    """Move a world point from one uniform model scale to another (same offset)."""
+    p = np.asarray(xyz, dtype=np.float64).reshape(3)
+    off = np.asarray(offset, dtype=np.float64).reshape(3)
+    src = max(float(from_scale), 1e-12)
+    ratio = float(to_scale) / src
+    return (p - off) * ratio + off
+
+
 def scale_geometry(vol_cm3: float, surf_cm2: float, z_max: float, scale: float) -> tuple[float, float, float]:
     """Linear pattern scale → volume ∝ s³, area ∝ s², height ∝ s."""
     s = float(scale)

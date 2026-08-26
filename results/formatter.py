@@ -221,6 +221,12 @@ def build_results_text(r: dict) -> str:
         rows.append(_section("PATTERN TICKET"))
         rows.append(_row("Catalog shrink", f"{pt.get('catalog_shrink_pct', 0):.1f} %"))
         rows.append(_row("Print this STL", f"×{pt.get('print_scale', 1):.3f}  ({pt.get('print_pct', 0):+.1f}%)"))
+        if pt.get("draft_ok") is False:
+            rows.append(_row("Draft", "Lock faces — add draft or print-in-place"))
+        elif pt.get("draft_ok") is True:
+            rows.append(_row("Draft", "OK for a two-part pull"))
+        if pt.get("undercut"):
+            rows.append(_row("Undercut", "Yes — core, lost-wax, or printed sand"))
         rows.append(_divider())
 
     cmpd = r.get("compare") or {}

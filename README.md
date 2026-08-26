@@ -60,8 +60,9 @@ solidification time, melt/sand tickets, and defect risk — all in a real-time
 - **Result layers** — hot-spot thickness, last-to-freeze, fill order, porosity,
   Niyama proxy, X-ray (ghosted skin + interior voxels)
 - **Cut plane** — clip the mesh along X/Y/Z
-- **Coarse voxels** — gravity flood, freeze ranking, isolated-liquid porosity,
-  Niyama proxy, chills, and sleeve (SOLIDCast-class, not CFD)
+- **Coarse voxels** — ~48³ gravity flood, freeze ranking, isolated-liquid porosity
+  (hot band = last 30 % after feeding stops at 70 % solid), Niyama proxy,
+  chills, and sleeve (SOLIDCast-class, not CFD)
 - **Physics simulation** (background thread):
   - Solidification time via Chvorinov's Rule (metal × mould type, including
     ceramic-shell thickness/preheat and printed-sand factor)
@@ -74,7 +75,8 @@ solidification time, melt/sand tickets, and defect risk — all in a real-time
 - **Actionable results** — Likely OK / Risky / Will probably fail, with
   click-to-fly “what to change” links
 - **Melt / pattern / sand-mix tickets** — ingots and furnace fit; shrink-compensated
-  pattern STL; lb sand + clay/water or resin; printed-sand print box + vents
+  pattern STL (scale applied **once**, independent of the as-cast preview);
+  lb sand + clay/water or resin; printed-sand print box + vents
 - **Shop traveler PDF** — one page: viewport screenshot, verdict, tickets, fixes
 - **Keep as A** — store a pour (text deltas + screenshot thumbnail) and compare
   a second setup
@@ -245,8 +247,15 @@ Parting-line plane is still the sprue/gate height on shell and printed sand
 ### 7 — Shrinkage and pattern STL
 
 The shrinkage slider is a print scale (100–110 → ×1.00–1.10).
-**Show as-cast** previews the frozen part without pattern oversize.
-**Export pattern STL…** writes the mesh at that scale for lost-PLA / 3D-print patterns.
+**Show as-cast** previews the frozen part without pattern oversize — it does
+**not** change the exported file or the simulated cavity.
+
+**Export pattern STL…** writes as-cast geometry × shrink **once** (lost-PLA /
+3D-print patterns). The mould-cavity simulation always uses that same
+pattern size, even when the viewport is showing as-cast.
+
+The runner bar spans the part silhouette (plus a short over-run) so yield
+metal matches what you see, not a fixed 160 mm stick.
 
 ### 8 — Run the simulation
 
@@ -348,14 +357,17 @@ Fill time is clamped to a minimum of 1.5 s. Gate velocity above 500 mm/s
 
 ### Voxels (coarse fill / freeze)
 
-After the 0-D checks, a ~32³ occupancy grid:
+After the 0-D checks, a ~48³ occupancy grid:
 
-1. Rasterizes the STL
+1. Rasterizes the STL (cavity / pattern size, not the as-cast preview)
 2. Gravity-floods from the gate
 3. Ranks freeze time as `B × (distance-to-mold)²`
-4. Marks isolated liquid (no feeder path) as porosity
+4. Marks isolated liquid (no feeder path) as porosity — hot band is the
+   last `1 − 0.70` of freeze time (`FEEDING_STOP_FRAC`)
 5. Builds a Niyama proxy `t / (|∇t| + ε)`
 6. Maps fields onto mesh faces and X-ray point clouds
+7. Reports a local hot-spot modulus for the riser check (max of global V/A
+   and voxel half-thickness)
 
 Chills locally shorten freeze distance; an insulating sleeve lengthens it
 around the riser. This is hobby-desktop SOLIDCast-class work, not MAGMA CFD.
@@ -373,7 +385,7 @@ Feeding is treated as stopped at solid fraction **0.70** (`FEEDING_STOP_FRAC`).
 | Superheat < 2× minimum | Warning | Low superheat |
 | Flask smaller than the part envelope (sand only) | Warning | Flask too small |
 | Cold or thin ceramic shell | Warning / defect | Preheat / breakthrough |
-| Riser modulus < 1.2 × part V/A | Warning | Riser may freeze first |
+| Riser modulus < 1.2 × max(part V/A, voxel hot-spot) | Warning | Riser may freeze first |
 | Blind / pinched riser neck | Warning | Neck freeze-off |
 | Gravity flood never reaches a lobe | Warning | Misrun (unfilled) |
 
@@ -563,13 +575,13 @@ All tests are headless (no display required). `tests/conftest.py` sets
 | Test file | Coverage | Count |
 |---|---|---|
 | `tests/test_simulation.py` | SimWorker physics | 44 |
-| `tests/test_formatter.py` | Results HTML, traveler, tickets | 53 |
-| `tests/test_geometry.py` | Mesh helpers and generators | 46 |
+| `tests/test_formatter.py` | Results HTML, traveler, tickets | 54 |
+| `tests/test_geometry.py` | Mesh helpers and generators | 49 |
 | `tests/test_foundry.py` | Yield, riser/neck, processes, session | 42 |
-| `tests/test_shop.py` | Recipes, wizard, melt/pattern/sand-mix | 19 |
-| `tests/test_voxels.py` | Occupancy, flood, freeze, porosity | 10 |
+| `tests/test_shop.py` | Recipes, wizard, melt/pattern/sand-mix | 21 |
+| `tests/test_voxels.py` | Occupancy, flood, freeze, porosity | 12 |
 
-**214 tests** at last count.
+**222 tests** at last count.
 
 ---
 
@@ -703,9 +715,12 @@ sand_casting_v2/
 - **Single parting line** — sand molds are a two-part cope/drag split.
   Ceramic shell and printed sand have no cope/drag; the plane is only
   sprue/gate height. Multi-part moulds and sand cores are not modelled.
-- **Voxels are coarse** — ~32³ cells, gravity flood, no turbulence, no
+- **Voxels are coarse** — ~48³ cells, gravity flood, no turbulence, no
   microstructure, no stress. Isolated-liquid porosity is a feeder-path
-  proxy, not a shrink-cavity CFD result.
+  proxy, not a shrink-cavity CFD result. This is not MAGMA, FLOW-3D, or a
+  CNC CAM kernel (no G-code / 5-axis toolpaths).
+- **Pattern scale is applied once** — export and the cavity sim use as-cast
+  geometry × the shrink slider. The as-cast checkbox is display-only.
 - **Isothermal fill assumption** — metal is treated as a single-temperature
   incompressible fluid. Partial solidification during fill is captured only by
   the rule-based cold-shut warning.

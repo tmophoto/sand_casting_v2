@@ -244,7 +244,12 @@ def sand_mix_ticket(
 
 
 def write_pattern_stl(vectors: np.ndarray, path: str | Path, scale: float) -> None:
-    """Write a shrink-compensated pattern mesh (numpy-stl)."""
+    """Write a shrink-compensated pattern mesh (numpy-stl).
+
+    ``vectors`` must be as-cast / scale-1 world triangles. ``scale`` is
+    applied here once (e.g. 1.06 for 6 % shrink). Passing an already
+    pattern-scaled mesh will oversize the file.
+    """
     from stl import mesh as stl_mesh
 
     v = np.asarray(vectors, dtype=np.float32) * float(scale)

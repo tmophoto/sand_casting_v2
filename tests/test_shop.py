@@ -103,6 +103,20 @@ class TestPatternTicket:
             write_pattern_stl(cube, path, 1.06)
             assert os.path.getsize(path) > 80
 
+    def test_scale_applied_once(self):
+        from stl import mesh as stl_mesh
+        cube = unit_cube_mesh() * 10.0
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "pattern.stl")
+            write_pattern_stl(cube, path, 1.06)
+            loaded = stl_mesh.Mesh.from_file(path)
+            assert abs(float(loaded.vectors.max()) - 10.6) < 0.05
+
+    def test_draft_flags_round_trip(self):
+        t = pattern_ticket("A356 Aluminum", 106, draft_ok=False, undercut=True)
+        assert t["draft_ok"] is False
+        assert t["undercut"] is True
+
 
 class TestCompare:
 

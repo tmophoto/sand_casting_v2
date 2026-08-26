@@ -630,11 +630,20 @@ class MainWindow(QMainWindow):
         self.as_cast_cb = QCheckBox("Show as-cast (no pattern scale)")
         self.export_pattern_btn = QPushButton("Export pattern STL…")
         self.export_pattern_btn.setObjectName("ghostBtn")
-        self.export_pattern_btn.setToolTip("Write the mesh at the shrink scale — print this for lost-PLA.")
+        self.export_pattern_btn.setToolTip(
+            "Write as-cast geometry × shrink once. The as-cast preview checkbox "
+            "does not change the file — you will not get a double-scaled pattern."
+        )
+        self.shrink_hint = QLabel(
+            "Pattern = as-cast × shrink. Simulate uses the cavity (pattern size)."
+        )
+        self.shrink_hint.setWordWrap(True)
+        self.shrink_hint.setObjectName("hint")
         lay.addWidget(self.shrink_label)
         lay.addWidget(self.shrink_slider)
         lay.addWidget(self.as_cast_cb)
         lay.addWidget(self.export_pattern_btn)
+        lay.addWidget(self.shrink_hint)
         panel.content_layout.addWidget(box)
         parent.addWidget(panel)
         panel.setExpanded(False)
@@ -982,7 +991,7 @@ class MainWindow(QMainWindow):
         self._refresh_status()
 
     def _on_export_pattern(self) -> None:
-        mesh = self.viewport.world_meshes()
+        mesh = self.viewport.assembled_mesh(scale=1.0)
         if mesh is None:
             QMessageBox.information(self, "Pattern STL", "Load a part first.")
             return
@@ -1000,7 +1009,10 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Export failed", str(e))
             return
         ticket = pattern_ticket(self.metal_combo.currentText(), self.shrink_slider.value())
-        QMessageBox.information(self, "Pattern STL", f"Saved:\n{path}\n\n{ticket['hint']}")
+        QMessageBox.information(
+            self, "Pattern STL",
+            f"Saved ×{scale:.3f} (scale applied once):\n{path}\n\n{ticket['hint']}",
+        )
 
     def _on_keep_a(self) -> None:
         if not self._last_result:
@@ -1230,8 +1242,8 @@ class MainWindow(QMainWindow):
         size = self._flask_presets.get(self.flask_combo.currentText(), (8, 10))
         self.viewport.set_flask(size, height_in=val)
 
-    def _current_flask_fit(self) -> dict:
-        xmin, xmax, ymin, ymax, zmin, zmax = self.viewport._compute_bounds()
+    def _current_flask_fit(self, scale: float | None = None) -> dict:
+        xmin, xmax, ymin, ymax, zmin, zmax = self.viewport._compute_bounds(scale=scale)
         size = self._flask_presets.get(self.flask_combo.currentText(), (8, 10))
         return flask_fit(xmin, xmax, ymin, ymax, float(size[0]), float(size[1]),
                          presets=self._flask_presets)
@@ -1658,29 +1670,39 @@ class MainWindow(QMainWindow):
             "vol_cm3": vol,
             "surf_cm2": surf,
             "has_riser": "Riser (Open)" in self.viewport.gating,
-            "gating_params": self.viewport.get_gating_params(),
+            "gating_params": self.viewport.get_gating_params(scale=scale),
             "runner_y_offset": self.viewport.runner_y_offset,
             "shrink_scale": scale,
             "z_max": z_max,
-            "flask_fit": {} if (self._is_shell() or self._is_printed()) else self._current_flask_fit(),
+            "flask_fit": {} if (self._is_shell() or self._is_printed()) else self._current_flask_fit(scale=scale),
             "flask_h_in": self.flask_h_slider.value(),
         }
-        mesh = self.viewport.world_meshes()
+        mesh = self.viewport.assembled_mesh(scale=scale)
         if mesh is not None:
             params["mesh_vectors"] = mesh
         gp = params["gating_params"]
-        xmin, xmax, ymin, ymax, zmin, zmax = self.viewport._compute_bounds()
+        xmin, xmax, ymin, ymax, zmin, zmax = self.viewport._compute_bounds(scale=scale)
         z_part = zmin + max(zmax - zmin, 1.0) * self.viewport.parting_z
-        params["gate_xyz"] = self.viewport._gate_xyz()
+        params["gate_xyz"] = self.viewport._gate_xyz(scale=scale)
         params["sprue_xyz"] = np.array(
             [float(self.viewport.sprue_offset[0]), float(self.viewport.sprue_offset[1]), z_part]
         )
         params["riser_xyz"] = np.array(
             [float(self.viewport.riser_offset[0]), float(self.viewport.riser_offset[1]), z_part]
         ) if gp.get("has_riser") else None
-        params["chills_xyz"] = list(self.viewport.chills)
+        params["chills_xyz"] = [
+            self.viewport.rescale_world_point(c, scale) for c in self.viewport.chills
+        ]
         params["sleeve"] = self.sleeve_cb.isChecked()
         params["bbox_mm"] = (xmax - xmin, ymax - ymin, zmax - zmin)
+        params["z_part"] = z_part
+        params["feed_stop_frac"] = FEEDING_STOP_FRAC
+        if self._is_printed():
+            params["draft_min_deg"] = 0.0
+        elif self._is_shell():
+            params["draft_min_deg"] = 0.5
+        else:
+            params["draft_min_deg"] = 1.5
         params["setup_label"] = (
             f"{PRINTED_SAND if self._is_printed() else ('shell' if self._is_shell() else self.mold_combo.currentText())} · {metal_name}"
         )

@@ -61,12 +61,30 @@ class TestPorosityAndAnalyze:
         poro = isolated_porosity(grid["occ"], freeze, [])
         assert int(poro.sum()) > 0
 
+    def test_later_feeding_stop_marks_more_hot_voxels(self):
+        grid = rasterize(_cube(40.0))
+        dist = dist_to_mold(grid["occ"])
+        freeze = freeze_time_s(dist, grid["pitch"], 3.0)
+        early = isolated_porosity(grid["occ"], freeze, [], top_frac=0.18)
+        late = isolated_porosity(grid["occ"], freeze, [], top_frac=0.30)
+        assert int(late.sum()) >= int(early.sum())
+
+    def test_default_hot_band_uses_feeding_stop(self):
+        from constants import FEEDING_STOP_FRAC
+        grid = rasterize(_cube(40.0))
+        dist = dist_to_mold(grid["occ"])
+        freeze = freeze_time_s(dist, grid["pitch"], 3.0)
+        a = isolated_porosity(grid["occ"], freeze, [])
+        b = isolated_porosity(grid["occ"], freeze, [], top_frac=1.0 - FEEDING_STOP_FRAC)
+        assert int(a.sum()) == int(b.sum())
+
     def test_analyze_returns_face_fields(self):
         mesh = _cube(40.0)
         out = analyze(mesh, B=3.0, gate_xyz=np.array([20.0, 0.0, 20.0]))
         assert len(out["face_freeze"]) == len(mesh)
         assert out["n_metal"] > 0
         assert "porosity_frac" in out
+        assert out["hotspot_va_cm"] > 0
 
     def test_analyze_xyz_points(self):
         mesh = _cube(40.0)
@@ -93,3 +111,5 @@ class TestWorkerVoxels:
         assert "melt_ticket" in r
         assert "pattern_ticket" in r
         assert r["melt_ticket"]["pour_mass_g"] > 0
+        assert r["hotspot_va_cm"] > 0
+        assert "draft_ok" in r["pattern_ticket"]

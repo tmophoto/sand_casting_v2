@@ -47,9 +47,9 @@ simulation/
   worker.py             # SimWorker — Chvorinov, hydraulics, voxels, tickets
   foundry.py            # Yield, riser/neck, draft, flask, process_kind, verdicts
   shop.py               # Recipes, wizard, melt / sand-mix / pattern tickets
-  voxels.py             # Coarse fill / freeze / porosity / Niyama / X-ray points
+  voxels.py             # ~48³ fill / freeze / porosity / Niyama / X-ray
   session.py            # .cast.json + recents
-  mesh_tools.py         # QEM, local thickness, defect sites
+  mesh_tools.py         # QEM, thickness, transform_triangles (scale once)
 viewport/
   viewport.py           # Viewport3D — PyVista or matplotlib
 results/
@@ -75,7 +75,8 @@ tests/
 | `simulation/worker.py` | `SimWorker` | Physics in a QThread |
 | `simulation/foundry.py` | `process_kind`, `riser_ok`, `gating_volumes_cm3` | Foundry helpers |
 | `simulation/shop.py` | `size_rigging`, `sand_mix_ticket` | Shop-floor extras |
-| `simulation/voxels.py` | `analyze` | Coarse voxel pass |
+| `simulation/mesh_tools.py` | `transform_triangles`, QEM, thickness | Mesh helpers; scale applied once |
+| `simulation/voxels.py` | `analyze` | Coarse voxel pass (~48³) |
 | `simulation/session.py` | `save_session`, `load_session` | Jobs and recents |
 | `viewport/viewport.py` | `Viewport3D` | 3-D view, gating meshes, overlays |
 | `results/formatter.py` | `build_results_text`, `build_traveler_html` | HTML for results / PDF |
@@ -83,7 +84,7 @@ tests/
 ### Dependency graph (no circular deps)
 
 ```
-constants ← simulation/{worker,foundry,shop,session}
+constants ← simulation/{worker,foundry,shop,session,voxels}
 constants ← viewport/viewport
 constants ← ui/main_window
 ui/style, ui/collapsible ← ui/main_window
@@ -110,9 +111,14 @@ foundry + shop + voxels ← simulation/worker
   Blind risers add the top as a cooling face. Neck modulus is **lateral only**
   (ends sit on riser and casting). Warn on blind or a pinched neck
   (`neck_r < 0.4 × riser_r`).
-- **Voxels** — ~32³ occupancy, gravity flood from the gate, freeze ~
-  `B × dist²`, isolated-liquid porosity, Niyama proxy, chills, sleeve.
-  X-ray uses `porosity_xyz` / `hot_xyz`. Feeding stop fraction is **0.70**.
+- **Voxels** — ~48³ occupancy, gravity flood from the gate, freeze ~
+  `B × dist²`, isolated-liquid porosity (hot band = last 30 % when
+  `FEEDING_STOP_FRAC` is 0.70), Niyama proxy, chills, sleeve.
+  X-ray uses `porosity_xyz` / `hot_xyz`. Riser check uses
+  `max(global V/A, voxel hot-spot modulus)`.
+- **Pattern scale** — `assembled_mesh(1.0)` then `write_pattern_stl(..., scale)`
+  so shrink is applied once. Simulate always uses cavity scale, not the
+  as-cast preview.
 - **Defect detection** — misrun, cold shut, burn-on (**sand only**), low
   superheat, flask overflow (**sand only**), ceramic-shell preheat /
   breakthrough, isolated liquid, erosion, gravity-flood unfilled lobes.
@@ -190,12 +196,12 @@ headless. `tests/conftest.py` sets `QT_QPA_PLATFORM=offscreen`.
 | `test_shop.py` | Recipes, wizard, tickets |
 | `test_voxels.py` | Rasterize / flood / porosity |
 
-**214 tests** at last count.
+**222 tests** at last count.
 
 ## Git Branch
 
-Active work for shop traveler / printed sand / extra gating lives on
-`cursor/shop-report-next-55e2`. Do not push directly to `master`.
+Active work for output-quality (single shrink, feeding-stop porosity, hotspot
+riser) lives on `cursor/output-quality-55e2`. Do not push directly to `master`.
 
 ## Common Tasks
 

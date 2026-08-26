@@ -360,6 +360,27 @@ class TestMeshTools:
         assert abs(surf - 80.0 * 1.1 ** 2) < 1e-9
         assert abs(z - 55.0) < 1e-9
 
+    def test_transform_triangles_scale_then_offset(self):
+        from simulation.mesh_tools import transform_triangles
+        cube = unit_cube_mesh()
+        out = transform_triangles(cube, offset=(10.0, 0.0, 0.0), rotation_deg=0.0, scale=2.0)
+        assert abs(float(out[:, :, 0].max()) - 12.0) < 1e-9
+        assert abs(float(out[:, :, 2].max()) - 2.0) < 1e-9
+
+    def test_transform_does_not_stack_if_scale_is_one(self):
+        from simulation.mesh_tools import transform_triangles
+        cube = unit_cube_mesh() * 10.0
+        out = transform_triangles(cube, offset=(0, 0, 0), rotation_deg=0.0, scale=1.0)
+        assert abs(float(out.max()) - 10.0) < 1e-9
+
+    def test_rescale_world_point_about_offset(self):
+        from simulation.mesh_tools import rescale_world_point
+        p = np.array([16.0, 0.0, 6.0])
+        q = rescale_world_point(p, offset=(10.0, 0.0, 0.0), from_scale=1.0, to_scale=1.06)
+        # (16-10)*1.06 + 10 = 16.36
+        assert abs(q[0] - 16.36) < 1e-9
+        assert abs(q[2] - 6.36) < 1e-9
+
 
 class TestMeshImport:
 

@@ -3,11 +3,13 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from constants import (
     METAL_DEFAULTS, DEFAULT_SHELL_MM,
     EROSION_VEL_SAND_MM_S, EROSION_VEL_SHELL_MM_S,
+    FEEDING_STOP_FRAC,
 )
 from simulation.foundry import (
     gating_volumes_cm3, casting_yield_pct, riser_ok,
     verdict_from_result, suggested_fixes, is_shell_mold, effective_mold_factor,
     recommended_shell_preheat_f, is_printed_sand, process_kind,
+    draft_analysis, undercut_hints,
 )
 from simulation.shop import melt_ticket, pattern_ticket, sand_mix_ticket
 
@@ -198,24 +200,7 @@ class SimWorker(QObject):
         pour_mass_g = (vol_cm3 + gating_cm3) * float(metal["density"])
         part_mass_g = vol_cm3 * float(metal["density"])
 
-        riser = riser_ok(
-            vsr, has_riser,
-            radius_mm=gating_params.get("riser_r_mm"),
-            height_mm=gating_params.get("riser_h_mm"),
-            blind=bool(gating_params.get("riser_blind")),
-            neck_r_mm=gating_params.get("neck_r_mm"),
-            neck_h_mm=gating_params.get("neck_h_mm"),
-        )
-        if riser["needed"] and not has_riser:
-            if not any("riser" in w.lower() or "porosity" in w.lower() for w in warnings):
-                warnings.append(
-                    "Porosity risk — thick section with no riser; add Riser (Open) to feed shrinkage"
-                )
-        elif has_riser and not riser["adequate"]:
-            warnings.append(
-                f"Riser may freeze before the hot spot — feeder modulus "
-                f"{riser['m_riser_cm']:.2f} cm < {riser['m_need_cm']:.2f} cm needed"
-            )
+        hotspot_va = vsr
 
         erosion_lim = EROSION_VEL_SHELL_MM_S if shell else EROSION_VEL_SAND_MM_S
         if fill_velocity_mm_s > erosion_lim:
@@ -223,17 +208,6 @@ class SimWorker(QObject):
                 f"Mold erosion risk — gate velocity {fill_velocity_mm_s:.0f} mm/s "
                 f"exceeds {erosion_lim:.0f} mm/s for this mould"
             )
-
-        if has_riser and not riser.get("neck_ok", True):
-            nr = float(gating_params.get("neck_r_mm") or 0.0)
-            rr = float(gating_params.get("riser_r_mm") or 20.0)
-            # Open risers with a shop-sized neck are fine; warn for blind
-            # feeders or an obviously pinched neck.
-            if gating_params.get("riser_blind") or (nr > 0 and nr < 0.4 * rr):
-                warnings.append(
-                    f"Riser neck may freeze first — neck modulus "
-                    f"{riser.get('m_neck_cm', 0):.2f} cm < feeder need"
-                )
 
         flask_info = p.get("flask_fit") or {}
         if (not shell) and (not printed) and flask_info.get("fits") is False:
@@ -260,6 +234,7 @@ class SimWorker(QObject):
                     sprue_xyz=p.get("sprue_xyz"),
                     chills_xyz=p.get("chills_xyz") or None,
                     sleeve=bool(p.get("sleeve")),
+                    feed_stop_frac=float(p.get("feed_stop_frac") or FEEDING_STOP_FRAC),
                 )
                 porosity_frac = float(vx.get("porosity_frac") or 0.0)
                 n_porosity = int(vx.get("n_porosity") or 0)
@@ -289,8 +264,39 @@ class SimWorker(QObject):
                     warnings.append(
                         f"Hot-spot porosity risk — {100 * porosity_frac:.0f}% last-to-freeze is unfed"
                     )
-            except Exception:
+                hot_va = vx.get("hotspot_va_cm")
+                if hot_va is not None:
+                    hotspot_va = max(hotspot_va, float(hot_va))
+            except Exception as exc:
                 voxel_faces = {}
+                warnings.append(f"Voxel pass skipped — {exc}")
+
+        riser = riser_ok(
+            hotspot_va, has_riser,
+            radius_mm=gating_params.get("riser_r_mm"),
+            height_mm=gating_params.get("riser_h_mm"),
+            blind=bool(gating_params.get("riser_blind")),
+            neck_r_mm=gating_params.get("neck_r_mm"),
+            neck_h_mm=gating_params.get("neck_h_mm"),
+        )
+        if riser["needed"] and not has_riser:
+            if not any("riser" in w.lower() or "porosity" in w.lower() for w in warnings):
+                warnings.append(
+                    "Porosity risk — thick section with no riser; add Riser (Open) to feed shrinkage"
+                )
+        elif has_riser and not riser["adequate"]:
+            warnings.append(
+                f"Riser may freeze before the hot spot — feeder modulus "
+                f"{riser['m_riser_cm']:.2f} cm < {riser['m_need_cm']:.2f} cm needed"
+            )
+        if has_riser and not riser.get("neck_ok", True):
+            nr = float(gating_params.get("neck_r_mm") or 0.0)
+            rr = float(gating_params.get("riser_r_mm") or 20.0)
+            if gating_params.get("riser_blind") or (nr > 0 and nr < 0.4 * rr):
+                warnings.append(
+                    f"Riser neck may freeze first — neck modulus "
+                    f"{riser.get('m_neck_cm', 0):.2f} cm < feeder need"
+                )
 
         self.progress.emit(90, "Assembling results")
 
@@ -339,9 +345,23 @@ class SimWorker(QObject):
         result["verdict"] = verdict_from_result(result)
         result["fixes"] = suggested_fixes(result, gating_params)
         result["melt_ticket"] = melt_ticket(pour_mass_g, metal_name)
+        draft_ok = p.get("draft_ok")
+        undercut = p.get("undercut")
+        mesh_for_draft = p.get("mesh_vectors")
+        if mesh_for_draft is not None and draft_ok is None:
+            if printed:
+                draft_ok, undercut = True, False
+            else:
+                min_deg = float(p.get("draft_min_deg") or 1.5)
+                d = draft_analysis(mesh_for_draft, min_deg=max(min_deg, 0.1))
+                u = undercut_hints(mesh_for_draft, float(p.get("z_part") or 0.0))
+                draft_ok = d["lock_count"] == 0
+                undercut = u["count"] > 0
         result["pattern_ticket"] = pattern_ticket(
             metal_name, shrink_slider=int(round(shrink_scale * 100)),
+            draft_ok=draft_ok, undercut=undercut,
         )
+        result["hotspot_va_cm"] = hotspot_va
         bbox = p.get("bbox_mm")
         flask = p.get("flask_fit") or {}
         result["sand_mix"] = sand_mix_ticket(

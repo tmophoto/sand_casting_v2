@@ -26,6 +26,7 @@ from constants import (COPE_COLOR, DRAG_COLOR, SPRUE_COLOR, RUNNER_COLOR,
 from simulation.mesh_tools import (
     inspect_mesh, invert_winding, qem_decimate, local_thickness,
     find_defect_sites, THIN_WALL_MM, load_mesh_vectors,
+    transform_triangles, rescale_world_point as _rescale_world_point,
 )
 from simulation.foundry import (
     snap_xy_to_silhouette, choke_location, draft_analysis, undercut_hints,
@@ -470,7 +471,7 @@ class Viewport3D(QWidget):
 
 
 
-    def _compute_bounds_for_model(self, name: str):
+    def _compute_bounds_for_model(self, name: str, scale: float | None = None):
         t   = self.transforms[name]
         off = t["offset"]
         rot = math.radians(t["rotation"])
@@ -478,7 +479,7 @@ class Viewport3D(QWidget):
 
         verts = self.models[name]["render_data"].reshape(-1, 3)
         cos_r, sin_r = math.cos(rot), math.sin(rot)
-        s = float(self._display_scale())
+        s = float(self._display_scale() if scale is None else scale)
         xs = (verts[:, 0] * cos_r - verts[:, 1] * sin_r) * s + off[0]
         ys = (verts[:, 0] * sin_r + verts[:, 1] * cos_r) * s + off[1]
         zs = verts[:, 2] * s + off[2]
@@ -486,16 +487,22 @@ class Viewport3D(QWidget):
 
 
 
-    def _compute_bounds(self):
+    def _compute_bounds(self, scale: float | None = None):
         if not self.models:
             fw_mm = self.flask_size[0] * 25.4
             fh_mm = self.flask_size[1] * 25.4
             return -fw_mm/2, fw_mm/2, -fh_mm/2, fh_mm/2, 0.0, 100.0
 
 
-        all_b = [self._compute_bounds_for_model(n) for n in self.models]
+        all_b = [self._compute_bounds_for_model(n, scale=scale) for n in self.models]
         xmins, xmaxs, ymins, ymaxs, zmins, zmaxs = zip(*all_b)
         return min(xmins), max(xmaxs), min(ymins), max(ymaxs), min(zmins), max(zmaxs)
+
+    def _effective_runner_length(self, scale: float | None = None) -> float:
+        """Runner bar spans the part XY silhouette plus a short over-run."""
+        xmin, xmax, ymin, ymax, _, _ = self._compute_bounds(scale)
+        span = max(xmax - xmin, ymax - ymin, 1.0)
+        return float(max(40.0, span + 24.0))
 
 
 
@@ -960,19 +967,17 @@ class Viewport3D(QWidget):
         mat[0, 3], mat[1, 3], mat[2, 3] = float(off[0]), float(off[1]), float(off[2])
         return mat
 
-    def _apply_transform(self, render_data: np.ndarray, t: dict) -> np.ndarray:
-        """Return world-space vertex array (shrink scale, rotation, offset)."""
-        verts = render_data.copy()
-        off = t["offset"]
-        rot = math.radians(t["rotation"])
-        cos_r, sin_r = math.cos(rot), math.sin(rot)
-        s = float(self._display_scale())
-        x_new = (verts[:, :, 0] * cos_r - verts[:, :, 1] * sin_r) * s
-        y_new = (verts[:, :, 0] * sin_r + verts[:, :, 1] * cos_r) * s
-        verts[:, :, 0] = x_new + off[0]
-        verts[:, :, 1] = y_new + off[1]
-        verts[:, :, 2] = verts[:, :, 2] * s + off[2]
-        return verts
+    def _apply_transform(
+        self, render_data: np.ndarray, t: dict, scale: float | None = None,
+    ) -> np.ndarray:
+        """World-space triangles. ``scale=None`` uses the display (as-cast vs shrink) factor."""
+        s = float(self._display_scale() if scale is None else scale)
+        return transform_triangles(
+            render_data,
+            offset=t["offset"],
+            rotation_deg=t["rotation"],
+            scale=s,
+        )
 
     def _clear_mpl_overlays(self) -> None:
         """Remove all matplotlib artists except persistent model collections."""
@@ -1018,7 +1023,7 @@ class Viewport3D(QWidget):
             ry = sy + self.runner_y_offset
             faces = self._make_box_mesh(
                 cx=sx, cy=ry, z_bottom=z_part - self.runner_height / 2.0,
-                width=self.runner_length, depth=self.runner_width, height=self.runner_height,
+                width=self._effective_runner_length(), depth=self.runner_width, height=self.runner_height,
             )
             self._add_pv_gating_mesh(faces, *_gating_colors["Runner (Horizontal)"])
 
@@ -1148,7 +1153,7 @@ class Viewport3D(QWidget):
             def _build_runner():
                 faces = self._make_box_mesh(
                     cx=sx, cy=ry, z_bottom=z_part - self.runner_height / 2.0,
-                    width=self.runner_length, depth=self.runner_width, height=self.runner_height,
+                    width=self._effective_runner_length(), depth=self.runner_width, height=self.runner_height,
                 )
                 colors = self._shade_faces(faces, self._hex_to_rgb(RUNNER_COLOR), alpha=0.85)
                 return faces, colors
@@ -1629,13 +1634,23 @@ class Viewport3D(QWidget):
     def _display_scale(self) -> float:
         return 1.0 if self.show_as_cast else float(self.shrink_scale)
 
-    def _gate_xyz(self) -> np.ndarray:
-        xmin, xmax, ymin, ymax, zmin, zmax = self._compute_bounds()
+    def _gate_xyz(self, scale: float | None = None) -> np.ndarray:
+        xmin, xmax, ymin, ymax, zmin, zmax = self._compute_bounds(scale)
         z_part = zmin + max(zmax - zmin, 1.0) * self.parting_z
         sx, sy = float(self.sprue_offset[0]), float(self.sprue_offset[1])
         if "Fan Gate" in self.gating:
             return np.array([sx, sy - 4.0, z_part], dtype=np.float64)
         return np.array([sx, sy, z_part], dtype=np.float64)
+
+    def rescale_world_point(self, xyz, scale: float) -> np.ndarray:
+        """Re-express a display-space click at ``scale`` (cavity / pattern)."""
+        t = self.transforms.get(self.active_model)
+        if t is None and self.transforms:
+            t = next(iter(self.transforms.values()))
+        off = (t or {}).get("offset") or (0.0, 0.0, 0.0)
+        return _rescale_world_point(
+            xyz, offset=off, from_scale=self._display_scale(), to_scale=scale,
+        )
 
     def _fill_mask(self, verts: np.ndarray, anim_frac: float) -> np.ndarray:
         """Fill from the gate outward (voxel flood order, else distance)."""
@@ -2081,8 +2096,17 @@ class Viewport3D(QWidget):
             self.set_view("Iso")
 
     def world_meshes(self) -> np.ndarray | None:
+        """Display-space assembly (as-cast or shrink, matching the viewport)."""
+        return self.assembled_mesh(scale=None)
+
+    def assembled_mesh(self, scale: float | None = None) -> np.ndarray | None:
+        """Concatenated world triangles at an explicit scale.
+
+        ``scale=None`` follows the as-cast checkbox. Pass ``1.0`` for as-cast
+        export geometry, or the shrink factor for the mould cavity used in sim.
+        """
         chunks = [
-            self._apply_transform(data["render_data"], self.transforms[name])
+            self._apply_transform(data["render_data"], self.transforms[name], scale=scale)
             for name, data in self.models.items()
         ]
         if not chunks:
@@ -2329,7 +2353,7 @@ class Viewport3D(QWidget):
             tuple(float(v) for v in self.riser_offset),
             tuple(float(v) for v in self.gate2_offset),
             self.sprue_top_radius, self.sprue_bottom_radius, self.sprue_height,
-            self.runner_width, self.runner_height, self.runner_length, self.gate_area,
+            self.runner_width, self.runner_height, round(self._effective_runner_length(), 1), self.gate_area,
             self.selected_gating, self.restrictive_elem,
             round(self.riser_radius, 2), round(self.riser_height, 2),
             round(self.neck_radius, 2), round(self.neck_height, 2),
@@ -2338,18 +2362,19 @@ class Viewport3D(QWidget):
             len(self.chills),
         )
 
-    def get_gating_params(self) -> dict:
+    def get_gating_params(self, scale: float | None = None) -> dict:
         has_sprue  = "Tapered Sprue" in self.gating
         has_runner = "Runner (Horizontal)" in self.gating
         has_gate   = "Fan Gate" in self.gating
         has_gate2  = "Second Gate" in self.gating
 
 
-        xmin, xmax, ymin, ymax, zmin, zmax = self._compute_bounds()
+        xmin, xmax, ymin, ymax, zmin, zmax = self._compute_bounds(scale)
         part_h = max(zmax - zmin, 1.0)
         z_part = zmin + part_h * self.parting_z
         cope_mm = max(0.0, zmax - z_part)
         head_mm = self.sprue_height + cope_mm
+        run_len = self._effective_runner_length(scale) if has_runner else None
 
         return {
             "has_sprue":        has_sprue,
@@ -2372,7 +2397,7 @@ class Viewport3D(QWidget):
             "riser_blind":      bool(self.riser_blind),
             "neck_r_mm":        self.neck_radius if "Riser (Open)" in self.gating else None,
             "neck_h_mm":        self.neck_height if "Riser (Open)" in self.gating else None,
-            "runner_length_mm": self.runner_length if has_runner else None,
+            "runner_length_mm": run_len,
             "riser_r_mm":       self.riser_radius if "Riser (Open)" in self.gating else None,
             "riser_h_mm":       self.riser_height if "Riser (Open)" in self.gating else None,
         }
@@ -2480,7 +2505,7 @@ class Viewport3D(QWidget):
                 picked = "Fan Gate"
         if not picked and "Runner (Horizontal)" in self.gating:
             sx, sy = self.sprue_offset
-            if abs(hit[0] - sx) < self.runner_length / 2 and abs(hit[1] - sy) < 20:
+            if abs(hit[0] - sx) < self._effective_runner_length() / 2 and abs(hit[1] - sy) < 20:
                 picked = "Runner (Horizontal)"
         if not picked and "Riser (Open)" in self.gating:
             rx, ry = self.riser_offset

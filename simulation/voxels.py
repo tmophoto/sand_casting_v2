@@ -1,10 +1,11 @@
 """Coarse voxel fill / freeze / porosity — MAGMA-looking results without CFD.
 
 Pipeline (all NumPy, no scipy):
-  1. Rasterize the STL into a padded occupancy grid (~32³).
+  1. Rasterize the STL into a padded occupancy grid (~48³).
   2. Gravity flood from the gate: downhill first, then lateral.
   3. Euclidean-ish distance to mold → freeze time ~ B × (dist)².
-  4. Isolated-liquid porosity: last-to-freeze voxels not fed by a riser.
+  4. Isolated-liquid porosity: last-to-freeze voxels not fed by a riser
+     (hot band = 1 − feeding-stop solid fraction, default last 30 %).
   5. Niyama proxy: freeze / (local gradient + ε) on the mesh faces.
   6. Map voxel fields onto triangle centroids for viewport paint.
 
@@ -18,9 +19,11 @@ from typing import Any
 
 import numpy as np
 
+from constants import FEEDING_STOP_FRAC
 
-TARGET_CELLS = 32
-MAX_CELLS = 40
+
+TARGET_CELLS = 48
+MAX_CELLS = 56
 PAD = 2
 
 
@@ -196,13 +199,19 @@ def isolated_porosity(
     occ: np.ndarray,
     freeze_s: np.ndarray,
     feeder_ijk: list[tuple[int, int, int]],
-    top_frac: float = 0.18,
+    top_frac: float | None = None,
+    feed_stop_frac: float | None = None,
 ) -> np.ndarray:
     """True on last-to-freeze voxels that cannot feed from a riser/sprue.
 
     Feeding path: walk through voxels whose freeze time is ≥ the current
-    voxel (still liquid when this one freezes).
+    voxel (still liquid when this one freezes). The hot band is the last
+    ``1 − feed_stop_frac`` of freeze time — the UI clock's 70 % solid
+    feeding cutoff.
     """
+    if top_frac is None:
+        fs = float(feed_stop_frac if feed_stop_frac is not None else FEEDING_STOP_FRAC)
+        top_frac = max(0.05, min(0.5, 1.0 - fs))
     if not np.any(occ):
         return np.zeros(occ.shape, dtype=bool)
     tmax = float(freeze_s[occ].max()) if np.any(occ) else 0.0
@@ -305,6 +314,7 @@ def analyze(
     sprue_xyz: np.ndarray | None = None,
     chills_xyz: list[np.ndarray] | None = None,
     sleeve: bool = False,
+    feed_stop_frac: float | None = None,
 ) -> dict[str, Any]:
     """Full voxel pass. Returns occupancy, fill order, freeze, porosity, Ny."""
     grid = rasterize(vectors)
@@ -334,12 +344,19 @@ def analyze(
         ijk = _ijk(pnt)
         if ijk is not None:
             feeders.append(ijk)
-    poro = isolated_porosity(occ, freeze, feeders)
+    poro = isolated_porosity(
+        occ, freeze, feeders,
+        feed_stop_frac=feed_stop_frac if feed_stop_frac is not None else FEEDING_STOP_FRAC,
+    )
     ny = niyama_proxy(freeze, pitch)
 
     n_metal = int(occ.sum())
     n_poro = int(poro.sum())
     n_unfilled = int(occ.sum() - (fill > 0).sum())
+    hotspot_va_cm = 0.0
+    if n_metal:
+        # dist is voxels-to-mold; half-thickness ≈ pitch × dist / 2 → cm
+        hotspot_va_cm = float(dist[occ].max()) * pitch / 20.0
     return {
         "occ": occ,
         "origin": origin,
@@ -354,6 +371,7 @@ def analyze(
         "n_porosity": n_poro,
         "porosity_frac": (n_poro / n_metal) if n_metal else 0.0,
         "n_unfilled": n_unfilled,
+        "hotspot_va_cm": hotspot_va_cm,
         "face_fill": map_to_faces(vectors, fill.astype(np.float32), origin, pitch),
         "face_freeze": map_to_faces(vectors, freeze, origin, pitch),
         "face_porosity": map_to_faces(vectors, poro.astype(np.float32), origin, pitch),

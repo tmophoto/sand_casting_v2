@@ -315,6 +315,16 @@ class TestShopTickets:
         assert "PATTERN TICKET" in text
         assert "×1.060" in text or "1.060" in text
 
+    def test_pattern_ticket_draft_lock(self):
+        text = build({
+            "pattern_ticket": {
+                "catalog_shrink_pct": 6.0, "print_scale": 1.06, "print_pct": 6.0,
+                "draft_ok": False, "undercut": True,
+            }
+        })
+        assert "Lock faces" in text
+        assert "Undercut" in text
+
     def test_compare_section(self):
         text = build({
             "compare": {
