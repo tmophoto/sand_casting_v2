@@ -87,12 +87,14 @@ ui/main_window ← casting_sim
 - **Solidification time** — Chvorinov's Rule: `t = B × (V/A)²`
   where `B = 3.0 × mold_constant × (H/H_A356) × (k_A356/k) × mold_factor`.
   `mold_factor` is 1.00 green sand, 1.15 dry sand, 0.85 resin/no-bake.
+  Ceramic shell starts at 0.62 (thin cold 8 mm shell) then scales with fired
+  thickness and shell preheat (hot shells freeze slower; extra coats insulate).
 - **Fill time** — Bernoulli gating hydraulics using the most restrictive cross-section.
   Falls back to `max(3.0 s, volume_cm³ / 80.0)` when no gating is configured.
 - **Yield** — melt mass is part + gating metal; casting yield is part / total.
 - **Riser** — open-riser modulus must exceed 1.2 × part V/A on heavy sections.
-- **Defect detection** — misrun, cold shut, burn-on, low superheat, flask overflow,
-  plus Auto thin-wall from local mesh thickness (< 6 mm).
+- **Defect detection** — misrun, cold shut, burn-on (sand), low superheat, flask overflow,
+  ceramic-shell preheat / breakthrough, plus Auto thin-wall from local mesh thickness (< 6 mm).
 
 ## Metals
 

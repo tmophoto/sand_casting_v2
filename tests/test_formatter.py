@@ -256,3 +256,15 @@ class TestRobustness:
     def test_zero_volume_handled(self):
         text = build({"vol_cm3": 0.0, "surf_cm2": 0.0, "vsr": 0.0})
         assert isinstance(text, str)
+
+    def test_ceramic_shell_shows_thickness_and_preheat(self):
+        text = build({
+            "mold_type": "Ceramic shell",
+            "process": "shell",
+            "shell_mm": 8,
+            "mold_f": 1100,
+        })
+        assert "Ceramic shell" in text
+        assert "8 mm" in text
+        assert "Shell preheat" in text
+        assert "1100" in text

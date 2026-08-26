@@ -7,7 +7,10 @@ from __future__ import annotations
 import math
 import numpy as np
 
-from constants import FLASK_SIZES, METAL_DEFAULTS, MOLD_TYPES, DRAFT_MIN_DEG
+from constants import (
+    FLASK_SIZES, METAL_DEFAULTS, MOLD_TYPES, DRAFT_MIN_DEG,
+    CERAMIC_SHELL, DEFAULT_SHELL_MM, SHELL_PREHEAT_DEFAULT_F,
+)
 
 # Open riser as drawn in the viewport (mm)
 _RISER_R_MM = 20.0
@@ -16,7 +19,64 @@ _GATE_LENGTH_MM = 6.0
 
 
 def mold_factor(name: str) -> float:
+    """Cold-mould Chvorinov multiplier (green sand = 1). Ceramic shell is 0.62."""
     return float(MOLD_TYPES.get(name, 1.0))
+
+
+def is_shell_mold(name: str) -> bool:
+    key = str(name or "").strip().lower()
+    return key in {
+        CERAMIC_SHELL.lower(),
+        "investment",
+        "lost wax",
+        "lost-wax",
+        "ceramic-shell",
+    }
+
+
+def recommended_shell_preheat_f(metal_name: str) -> int:
+    if metal_name in SHELL_PREHEAT_DEFAULT_F:
+        return int(SHELL_PREHEAT_DEFAULT_F[metal_name])
+    metal = METAL_DEFAULTS.get(metal_name) or METAL_DEFAULTS["A356 Aluminum"]
+    return int(min(2200, max(700, metal["melt_temp_f"] - 200)))
+
+
+def shell_chvorinov_factor(
+    shell_mm: float = DEFAULT_SHELL_MM,
+    mold_f: float = 77.0,
+    pour_f: float = 1300.0,
+) -> float:
+    """Effective B multiplier vs green sand for a fired ceramic shell.
+
+    Thin cold shells freeze faster than packed sand. Preheat reduces the
+    metal-to-mould ΔT so freeze slows; extra coats add insulation.
+    """
+    base = mold_factor(CERAMIC_SHELL)
+    thick = min(2.0, max(0.5, float(shell_mm) / DEFAULT_SHELL_MM))
+    span = max(float(pour_f) - 77.0, 200.0)
+    frac = min(1.0, max(0.0, (float(mold_f) - 77.0) / span))
+    preheat = 1.0 + 1.1 * frac
+    return base * thick * preheat
+
+
+def effective_mold_factor(
+    name: str,
+    *,
+    shell_mm: float = DEFAULT_SHELL_MM,
+    mold_f: float = 77.0,
+    pour_f: float = 1300.0,
+) -> float:
+    if is_shell_mold(name):
+        return shell_chvorinov_factor(shell_mm, mold_f, pour_f)
+    return mold_factor(name)
+
+
+def shell_envelope(
+    xmin: float, xmax: float, ymin: float, ymax: float,
+    zmin: float, zmax: float, shell_mm: float = DEFAULT_SHELL_MM,
+) -> tuple[float, float, float, float, float, float]:
+    t = float(shell_mm)
+    return xmin - t, xmax + t, ymin - t, ymax + t, zmin - t, zmax + t
 
 
 def _circle_area_mm2(radius_mm: float) -> float:
@@ -329,6 +389,25 @@ def suggested_fixes(r: dict, gating: dict | None = None) -> list[dict]:
                 "kind": "burnon",
                 "text": w,
                 "fix": "Drop mold temperature to ≤ 120 °F, or use a mold wash.",
+            })
+        elif "preheat" in low or "cold shell" in low:
+            rec = recommended_shell_preheat_f(metal_name)
+            fixes.append({
+                "kind": "shell_preheat",
+                "text": w,
+                "fix": f"Preheat the ceramic shell to ~{rec} °F before pouring.",
+            })
+        elif "breakthrough" in low or ("thin shell" in low):
+            fixes.append({
+                "kind": "shell_thickness",
+                "text": w,
+                "fix": "Add slurry coats — aim for an 8–10 mm fired shell.",
+            })
+        elif "shell hotter" in low:
+            fixes.append({
+                "kind": "shell_preheat",
+                "text": w,
+                "fix": "Let the shell drop a little below pour temperature before filling.",
             })
         elif "riser may freeze" in low or "feeder" in low:
             fixes.append({

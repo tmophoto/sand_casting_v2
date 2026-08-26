@@ -42,6 +42,9 @@ class CollapsiblePanel(QFrame):
         layout.addWidget(self.content_frame)
         self._is_expanded = False
 
+    def setTitle(self, title: str) -> None:
+        self.title_label.setText(title)
+
     def toggle(self):
         """Toggle the expanded state."""
         self._is_expanded = not self._is_expanded

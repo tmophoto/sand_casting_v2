@@ -75,11 +75,29 @@ FLASK_SIZES = {
 # Cope + drag stack height in inches (XY flask sizes do not include Z)
 DEFAULT_FLASK_HEIGHT_IN = 6.0
 
-# Mould material multiplier on Chvorinov B (green sand = 1)
+# Mould material multiplier on Chvorinov B (green sand = 1).
+# Ceramic shell uses this as the *cold* 8 mm baseline; preheat and thickness
+# are applied on top in simulation.foundry.effective_mold_factor().
+CERAMIC_SHELL = "Ceramic shell"
 MOLD_TYPES = {
     "Green sand": 1.00,
     "Dry sand": 1.15,
     "Resin / no-bake": 0.85,
+    CERAMIC_SHELL: 0.62,
+}
+
+# Lost-wax / investment ceramic shell
+DEFAULT_SHELL_MM = 8.0
+SHELL_MM_MIN = 4
+SHELL_MM_MAX = 16
+SHELL_COLOR = "#E8D5B7"
+# Typical fired-shell preheat by alloy (°F)
+SHELL_PREHEAT_DEFAULT_F = {
+    "A356 Aluminum": 1100,
+    "Everdur Bronze (C52100)": 1600,
+    "Gray Iron (ASTM A48)": 1800,
+    "Ductile Iron (65-45-12)": 1800,
+    "316 Stainless Steel": 1900,
 }
 
 # Sprue : runner : gate area ratios

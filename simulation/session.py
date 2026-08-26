@@ -22,6 +22,7 @@ def default_session() -> dict:
         "pour_temp_f": 1300,
         "mold_temp_f": 100,
         "mold_type": "Green sand",
+        "shell_mm": 8,
         "thin_wall": "Auto",
         "parting_pct": 50,
         "flask": "8 x 10",

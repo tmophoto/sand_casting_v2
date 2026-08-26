@@ -42,13 +42,17 @@ in a real-time 3D viewer.
 - **Fill animation** — metal spreads from the gate (distance order), with a fill/solidify clock
 - **Solidification animation** — freeze order follows local wall thickness (thin first)
 - **Physics simulation** (background thread):
-  - Solidification time via Chvorinov's Rule (metal properties × mould type)
+  - Solidification time via Chvorinov's Rule (metal properties × mould type,
+    including ceramic-shell thickness and preheat)
   - Fill time via Bernoulli gating hydraulics using the most-restrictive cross-section
   - Casting yield and melt mass including gating metal
   - Riser modulus check vs hot-spot V/A
-  - Defect risk detection: misrun, cold shut, burn-on, low superheat, flask overflow
+  - Defect risk detection: misrun, cold shut, burn-on, low superheat, flask overflow,
+    cold/thin ceramic shell
 - **Actionable results** — Likely OK / Risky / Will probably fail, with click-to-fly fixes
 - **Foundry checks** — draft overlay, undercut/core-print overlay, auto flask fit
+- **Ceramic shell (investment / lost-wax)** — fired-shell thickness, shell preheat,
+  no sand flask, envelope overlay in the viewport
 - **Pattern vs as-cast** — shrinkage scale with a toggle to preview the frozen part
 - **Defect markers** — coloured spheres rendered at risk locations after simulation
 - **Shrinkage compensation** — configurable scale factor per metal
@@ -174,11 +178,16 @@ part's total height (5 %–95 %). The blue horizontal plane in the viewport upda
 live. Faces above the parting line are shown in blue (cope half); faces below in
 brown (drag half).
 
-### 3 — Choose a Flask Size
+### 3 — Flask or ceramic shell
 
-Pick a standard flask from the **Flask Size** drop-down (6×6 through 14×20 inches)
-or click **+ Custom** to enter an arbitrary width and height. The dashed outline in
-the viewport reflects the selected flask.
+**Sand molds** — pick a standard flask from the **Flask** drop-down (6×6 through
+14×20 inches) or click **+ Custom**. Auto-fit chooses the smallest preset that
+clears the part. The dashed outline in the viewport is the flask.
+
+**Ceramic shell** — under **Mold**, choose **Ceramic shell**. The flask panel
+becomes fired-shell thickness (4–16 mm) and **Shell preheat**. The viewport
+draws a ceramic envelope around the part instead of a sand flask. Typical
+preheat is ~1100 °F for A356 and ~1600–1900 °F for bronze, iron, and stainless.
 
 ### 4 — Configure the Gating System
 
@@ -202,10 +211,15 @@ The **Metal & Temperature** panel provides:
 
 - **Metal** drop-down — A356 Aluminum or Everdur Bronze; pour temperature and
   shrinkage defaults update automatically.
-- **Pour Temp** slider (800–3,200 °F) — override the metal's default pour
+- **Mold** drop-down — Green sand, dry sand, resin/no-bake, or ceramic shell
+  (investment / lost-wax).
+- **Pour Temp** spin box (800–3,200 °F) — override the metal's default pour
   temperature. The range covers aluminium through stainless steel.
-- **Mold Temp** slider (32–300 °F) — mould pre-heat temperature; values above
-  120 °F trigger a burn-on warning.
+- **Mold Temp** (sand, 32–400 °F) — mould pre-heat; values above 120 °F trigger
+  a burn-on warning.
+- **Shell preheat** (ceramic shell, 200–2,200 °F) — fired-shell temperature at
+  pour. A hot shell fills thin walls more easily and freezes slower than a
+  cold shell. Burn-on does not apply.
 - **Thin Wall?** — flag that tightens the cold-shut superheat threshold.
 
 ### 6 — Position the Model
@@ -270,7 +284,7 @@ t_solidify = B × (V / A)²
 | Symbol | Meaning |
 |---|---|
 | `t_solidify` | Solidification time (minutes) |
-| `B` | `3.0 × mold_constant × (H / H_A356) × (k_A356 / k)` |
+| `B` | `3.0 × mold_constant × (H / H_A356) × (k_A356 / k) × mold_factor` |
 | `H` | Volumetric enthalpy `ρ (c ΔT + L)` from pour through freeze |
 | `V` | Part volume (cm³) |
 | `A` | Part surface area (cm²) |
@@ -278,7 +292,9 @@ t_solidify = B × (V / A)²
 A356 at its catalogue pour temperature has `(H / H_A356) × (k_A356 / k) = 1`,
 so its freeze time matches the original `B = 3.0 × mold_constant` scale. Other
 alloys pick up density, specific heat, latent heat, and conductivity. Pour mass
-is `volume × density` (grams).
+is `volume × density` (grams). `mold_factor` is 1.00 green sand, 1.15 dry sand,
+0.85 resin/no-bake. Ceramic shell starts at 0.62 for a cold 8 mm shell, then
+scales with fired thickness and preheat (hot shells freeze slower).
 
 ### Fill Time — Bernoulli Gating Hydraulics
 
@@ -571,7 +587,8 @@ sand_casting_v2/
   values.
 - **QEM decimation** — Garland–Heckbert edge collapse to 25,000 triangles;
   grid clustering is only used if QEM cannot reach the budget.
-- **Single parting line** — simple two-part cope/drag mould only. Multi-part
+- **Single parting line** — sand molds are a simple two-part cope/drag split.
+  Ceramic shell has no cope/drag; the plane is only sprue/gate height. Multi-part
   moulds and sand cores are not modelled.
 - **Isothermal fill assumption** — metal is treated as a single-temperature
   incompressible fluid. Partial solidification during fill is captured only by

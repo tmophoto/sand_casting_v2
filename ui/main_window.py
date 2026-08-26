@@ -17,12 +17,13 @@ from simulation.worker import SimWorker
 from results.formatter import build_results_text
 from constants import (
     METAL_DEFAULTS, FLASK_SIZES, shrink_scale_from_slider, DEFAULT_FLASK_HEIGHT_IN,
-    MOLD_TYPES, GATING_RATIOS,
+    MOLD_TYPES, GATING_RATIOS, DEFAULT_SHELL_MM, SHELL_MM_MIN,
+    SHELL_MM_MAX,
 )
 from simulation.mesh_tools import scale_geometry, local_thickness, THIN_WALL_MM
 from simulation.foundry import (
     apply_gating_ratio, flask_fit, recommended_pour_band, draft_analysis,
-    undercut_hints,
+    undercut_hints, is_shell_mold, recommended_shell_preheat_f,
 )
 from simulation.session import (
     save_session, load_session, recent_projects, remember_project, default_session,
@@ -254,6 +255,10 @@ class MainWindow(QMainWindow):
         for name in MOLD_TYPES:
             self.mold_combo.addItem(name)
         lay.addWidget(self.mold_combo)
+        self.mold_hint = QLabel("")
+        self.mold_hint.setWordWrap(True)
+        self.mold_hint.setStyleSheet("color: #A6ADC8; font-size: 11px;")
+        lay.addWidget(self.mold_hint)
 
         self.pour_spin = QSpinBox()
         self.pour_spin.setRange(800, 3200)
@@ -273,6 +278,10 @@ class MainWindow(QMainWindow):
         self.mold_temp_label = QLabel("Mold temp")
         lay.addWidget(self.mold_temp_label)
         lay.addWidget(self.mold_spin)
+        self.preheat_band_label = QLabel("")
+        self.preheat_band_label.setStyleSheet("color: #A6ADC8; font-size: 11px;")
+        self.preheat_band_label.setVisible(False)
+        lay.addWidget(self.preheat_band_label)
 
         self.thin_combo = QComboBox()
         self.thin_combo.addItems(["Auto", "No", "Yes"])
@@ -288,8 +297,13 @@ class MainWindow(QMainWindow):
 
     def _build_flask_panel(self, parent):
         panel = CollapsiblePanel("Flask")
+        self.flask_panel = panel
         box = QWidget()
         lay = QVBoxLayout(box)
+
+        self._flask_sand_box = QWidget()
+        sand = QVBoxLayout(self._flask_sand_box)
+        sand.setContentsMargins(0, 0, 0, 0)
         self.flask_combo = QComboBox()
         self._flask_presets = dict(FLASK_SIZES)
         for name in self._flask_presets:
@@ -299,18 +313,39 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         row.addWidget(self.flask_combo)
         row.addWidget(self.add_flask_btn)
-        lay.addLayout(row)
-        lay.addWidget(self.auto_flask_btn)
+        sand.addLayout(row)
+        sand.addWidget(self.auto_flask_btn)
         self.flask_h_slider = QSlider(Qt.Orientation.Horizontal)
         self.flask_h_slider.setMinimum(3)
         self.flask_h_slider.setMaximum(18)
         self.flask_h_slider.setValue(int(DEFAULT_FLASK_HEIGHT_IN))
         self.flask_h_label = QLabel(f"Stack height: {int(DEFAULT_FLASK_HEIGHT_IN)} in")
-        lay.addWidget(self.flask_h_label)
-        lay.addWidget(self.flask_h_slider)
+        sand.addWidget(self.flask_h_label)
+        sand.addWidget(self.flask_h_slider)
         self.flask_fit_label = QLabel("")
         self.flask_fit_label.setWordWrap(True)
-        lay.addWidget(self.flask_fit_label)
+        sand.addWidget(self.flask_fit_label)
+        lay.addWidget(self._flask_sand_box)
+
+        self._flask_shell_box = QWidget()
+        shell = QVBoxLayout(self._flask_shell_box)
+        shell.setContentsMargins(0, 0, 0, 0)
+        self.shell_hint = QLabel(
+            "Lost-wax / investment: dip ceramic slurry, dewax, fire, pour into the hot shell. No sand flask."
+        )
+        self.shell_hint.setWordWrap(True)
+        self.shell_hint.setStyleSheet("color: #A6ADC8; font-size: 11px;")
+        shell.addWidget(self.shell_hint)
+        self.shell_mm_slider = QSlider(Qt.Orientation.Horizontal)
+        self.shell_mm_slider.setMinimum(SHELL_MM_MIN)
+        self.shell_mm_slider.setMaximum(SHELL_MM_MAX)
+        self.shell_mm_slider.setValue(int(DEFAULT_SHELL_MM))
+        self.shell_mm_label = QLabel(f"Fired shell: {int(DEFAULT_SHELL_MM)} mm")
+        shell.addWidget(self.shell_mm_label)
+        shell.addWidget(self.shell_mm_slider)
+        self._flask_shell_box.setVisible(False)
+        lay.addWidget(self._flask_shell_box)
+
         panel.content_layout.addWidget(box)
         parent.addWidget(panel)
         panel.setExpanded(False)
@@ -326,9 +361,13 @@ class MainWindow(QMainWindow):
         self.parting_label = QLabel("Position: 50%")
         self.pick_parting_btn = QPushButton("Pick in 3D")
         self.pick_parting_btn.setToolTip("Click in the viewport to set the cope/drag split height.")
+        self.parting_hint = QLabel("")
+        self.parting_hint.setWordWrap(True)
+        self.parting_hint.setStyleSheet("color: #A6ADC8; font-size: 11px;")
         lay.addWidget(self.parting_label)
         lay.addWidget(self.parting_slider)
         lay.addWidget(self.pick_parting_btn)
+        lay.addWidget(self.parting_hint)
         panel.content_layout.addWidget(box)
         parent.addWidget(panel)
         panel.setExpanded(False)
@@ -427,10 +466,10 @@ class MainWindow(QMainWindow):
             cb.stateChanged.connect(lambda _s, n=name: self._on_gating_toggled())
 
         self.metal_combo.currentIndexChanged.connect(self._on_metal_changed)
+        self.mold_combo.currentTextChanged.connect(self._on_mold_changed)
         self.pour_spin.valueChanged.connect(self._on_pour_changed)
-        self.mold_spin.valueChanged.connect(
-            lambda v: self.mold_temp_label.setText(f"Mold temp: {v} °F")
-        )
+        self.mold_spin.valueChanged.connect(self._on_mold_temp_changed)
+        self.shell_mm_slider.valueChanged.connect(self._on_shell_mm_changed)
 
         self.flask_combo.currentTextChanged.connect(self._on_flask_changed)
         self.flask_h_slider.valueChanged.connect(self._on_flask_height_changed)
@@ -480,6 +519,7 @@ class MainWindow(QMainWindow):
 
         self._on_flask_changed(self.flask_combo.currentText())
         self._update_pour_band()
+        self._sync_process_ui(set_preheat=False)
 
     def _apply_transform(self):
         dx, dy, dz, rot = (
@@ -595,6 +635,63 @@ class MainWindow(QMainWindow):
         self.viewport.set_active_metal(metal_name)
         self._update_pour_band()
         self._on_shrink(self.shrink_slider.value())
+        if self._is_shell():
+            self.mold_spin.setValue(recommended_shell_preheat_f(metal_name))
+        self._sync_process_ui(set_preheat=False)
+
+    def _is_shell(self) -> bool:
+        return is_shell_mold(self.mold_combo.currentText())
+
+    def _on_mold_changed(self, _text: str = "") -> None:
+        self._sync_process_ui(set_preheat=True)
+
+    def _on_mold_temp_changed(self, val: int) -> None:
+        if self._is_shell():
+            self.mold_temp_label.setText(f"Shell preheat: {val} °F")
+        else:
+            self.mold_temp_label.setText(f"Mold temp: {val} °F")
+
+    def _on_shell_mm_changed(self, val: int) -> None:
+        self.shell_mm_label.setText(f"Fired shell: {val} mm")
+        self.viewport.set_mold_process("shell", shell_mm=val)
+
+    def _sync_process_ui(self, set_preheat: bool = False) -> None:
+        shell = self._is_shell()
+        metal_name = self.metal_combo.currentText()
+        rec = recommended_shell_preheat_f(metal_name)
+        self._flask_sand_box.setVisible(not shell)
+        self._flask_shell_box.setVisible(shell)
+        self.flask_panel.setTitle("Ceramic shell" if shell else "Flask")
+        self.preheat_band_label.setVisible(shell)
+        if shell:
+            self.mold_hint.setText(
+                "Ceramic shell (investment / lost-wax). Preheat the fired shell; skip the sand flask."
+            )
+            self.preheat_band_label.setText(f"Typical preheat ~{rec} °F for {metal_name}.")
+            self.mold_spin.setRange(200, 2200)
+            if set_preheat:
+                self.mold_spin.setValue(rec)
+            self.mold_temp_label.setText(f"Shell preheat: {self.mold_spin.value()} °F")
+            self.parting_hint.setText(
+                "Investment has no cope/drag split — this plane is only the sprue/gate height."
+            )
+            self.pick_parting_btn.setToolTip("Click in the viewport to set sprue/gate height.")
+            self.undercut_cb.setText("Undercut overlay (lost-wax: wax melts out)")
+            self.draft_cb.setText("Draft overlay (wax die — optional)")
+            self.viewport.set_mold_process("shell", shell_mm=self.shell_mm_slider.value())
+            self.flask_panel.setExpanded(True)
+        else:
+            self.mold_hint.setText("")
+            self.mold_spin.setRange(32, 400)
+            if set_preheat:
+                self.mold_spin.setValue(100)
+            self.mold_temp_label.setText(f"Mold temp: {self.mold_spin.value()} °F")
+            self.parting_hint.setText("")
+            self.pick_parting_btn.setToolTip("Click in the viewport to set the cope/drag split height.")
+            self.undercut_cb.setText("Undercut / core-print overlay")
+            self.draft_cb.setText("Draft overlay (red = lock)")
+            self.viewport.set_mold_process("sand")
+            self._refresh_flask_fit()
 
     def _on_shrink(self, val: int) -> None:
         pct = METAL_DEFAULTS[self.metal_combo.currentText()]["shrinkage_pct"]
@@ -667,9 +764,11 @@ class MainWindow(QMainWindow):
             self.viewport.set_overlay_mode("draft")
             mesh = self.viewport.world_meshes()
             if mesh is not None:
-                d = draft_analysis(mesh)
+                min_deg = 0.5 if self._is_shell() else 1.5
+                d = draft_analysis(mesh, min_deg=min_deg)
+                kind = "wax-die draft" if self._is_shell() else "sand draft"
                 self.inspect_label.setText(
-                    f"{d['lock_count']} faces below {d['min_draft_deg']:.1f}° min draft "
+                    f"{d['lock_count']} faces below {min_deg:.1f}° {kind} "
                     f"({100 * d['lock_frac']:.0f}% of the surface)."
                 )
             return
@@ -680,10 +779,16 @@ class MainWindow(QMainWindow):
                 xmin, xmax, ymin, ymax, zmin, zmax = self.viewport._compute_bounds()
                 z_part = zmin + max(zmax - zmin, 1.0) * self.viewport.parting_z
                 u = undercut_hints(mesh, z_part)
-                self.inspect_label.setText(
-                    f"{u['count']} faces look like undercuts / core prints "
-                    f"({100 * u['frac']:.0f}% of the surface)."
-                )
+                if self._is_shell():
+                    self.inspect_label.setText(
+                        f"{u['count']} faces would undercut a two-part sand mold "
+                        f"({100 * u['frac']:.0f}%). Lost-wax: wax melts out — cores only if hollow."
+                    )
+                else:
+                    self.inspect_label.setText(
+                        f"{u['count']} faces look like undercuts / core prints "
+                        f"({100 * u['frac']:.0f}% of the surface)."
+                    )
             return
         self.viewport.set_overlay_mode("")
         self.inspect_label.setText("")
@@ -776,6 +881,7 @@ class MainWindow(QMainWindow):
             "pour_temp_f": self.pour_spin.value(),
             "mold_temp_f": self.mold_spin.value(),
             "mold_type": self.mold_combo.currentText(),
+            "shell_mm": self.shell_mm_slider.value(),
             "thin_wall": self.thin_combo.currentText(),
             "parting_pct": self.parting_slider.value(),
             "flask": self.flask_combo.currentText(),
@@ -807,11 +913,22 @@ class MainWindow(QMainWindow):
             elif data.get("stl_path") and Path(data["stl_path"]).exists():
                 self._load_stl_path(data["stl_path"])
         if data.get("metal"):
+            self.metal_combo.blockSignals(True)
             self.metal_combo.setCurrentText(data["metal"])
-        self.pour_spin.setValue(int(data.get("pour_temp_f", 1300)))
-        self.mold_spin.setValue(int(data.get("mold_temp_f", 100)))
+            self.metal_combo.blockSignals(False)
+            self.viewport.set_active_metal(data["metal"])
+            self._update_pour_band()
+        self.mold_combo.blockSignals(True)
         if data.get("mold_type"):
             self.mold_combo.setCurrentText(data["mold_type"])
+        self.mold_combo.blockSignals(False)
+        self.shell_mm_slider.blockSignals(True)
+        self.shell_mm_slider.setValue(int(data.get("shell_mm", DEFAULT_SHELL_MM)))
+        self.shell_mm_slider.blockSignals(False)
+        self._sync_process_ui(set_preheat=False)
+        self.pour_spin.setValue(int(data.get("pour_temp_f", 1300)))
+        self.mold_spin.setValue(int(data.get("mold_temp_f", 100)))
+        self._on_mold_temp_changed(self.mold_spin.value())
         if data.get("thin_wall"):
             self.thin_combo.setCurrentText(data["thin_wall"])
         self.parting_slider.setValue(int(data.get("parting_pct", 50)))
@@ -928,6 +1045,7 @@ class MainWindow(QMainWindow):
             "pour_temp_f": self.pour_spin.value(),
             "mold_temp_f": self.mold_spin.value(),
             "mold_type": self.mold_combo.currentText(),
+            "shell_mm": self.shell_mm_slider.value(),
             "thin_wall": self._thin_wall_flag(),
             "shrinkage": metal_params["shrinkage_pct"],
             "gate_types": [n for n, cb in self.gating_checkboxes.items() if cb.isChecked()],
@@ -938,7 +1056,7 @@ class MainWindow(QMainWindow):
             "runner_y_offset": self.viewport.runner_y_offset,
             "shrink_scale": scale,
             "z_max": z_max,
-            "flask_fit": self._current_flask_fit(),
+            "flask_fit": {} if self._is_shell() else self._current_flask_fit(),
         }
         self.progress_bar.setVisible(True)
         self.sim_btn.setEnabled(False)
@@ -1026,7 +1144,10 @@ class MainWindow(QMainWindow):
         self.viewport.reset_anim()
         metal = METAL_DEFAULTS[self.metal_combo.currentText()]
         self.pour_spin.setValue(metal["pour_temp_f"])
-        self.mold_spin.setValue(100)
+        if self._is_shell():
+            self.mold_spin.setValue(recommended_shell_preheat_f(self.metal_combo.currentText()))
+        else:
+            self.mold_spin.setValue(100)
         self.thin_combo.setCurrentIndex(0)
         self.parting_slider.setValue(50)
         self.x_slider.setValue(0)

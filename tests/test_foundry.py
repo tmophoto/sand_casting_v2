@@ -12,6 +12,8 @@ from simulation.foundry import (
     mold_factor, gating_volumes_cm3, casting_yield_pct, apply_gating_ratio,
     snap_xy_to_silhouette, flask_fit, draft_analysis, undercut_hints,
     open_riser_modulus_cm, riser_ok, verdict_from_result, suggested_fixes,
+    is_shell_mold, effective_mold_factor, shell_chvorinov_factor,
+    recommended_shell_preheat_f, shell_envelope,
 )
 from simulation.session import save_session, load_session, default_session
 from simulation.worker import SimWorker
@@ -27,6 +29,33 @@ class TestMoldAndYield:
 
     def test_resin_is_faster_than_green(self):
         assert mold_factor("Resin / no-bake") < mold_factor("Green sand")
+
+    def test_ceramic_shell_is_faster_than_green_when_cold(self):
+        assert mold_factor("Ceramic shell") < mold_factor("Green sand")
+        assert is_shell_mold("Ceramic shell")
+        assert not is_shell_mold("Green sand")
+
+    def test_hot_shell_slower_than_cold_shell(self):
+        cold = shell_chvorinov_factor(8.0, mold_f=77, pour_f=1300)
+        hot = shell_chvorinov_factor(8.0, mold_f=1100, pour_f=1300)
+        assert hot > cold
+
+    def test_thicker_shell_insulates_more(self):
+        thin = shell_chvorinov_factor(5.0, mold_f=1100, pour_f=1300)
+        thick = shell_chvorinov_factor(12.0, mold_f=1100, pour_f=1300)
+        assert thick > thin
+
+    def test_effective_factor_sand_ignores_shell_args(self):
+        assert abs(
+            effective_mold_factor("Green sand", shell_mm=16, mold_f=1800, pour_f=1300) - 1.0
+        ) < 1e-12
+
+    def test_shell_envelope_expands_aabb(self):
+        b = shell_envelope(0, 10, 0, 10, 0, 10, 8)
+        assert b[0] == -8 and b[1] == 18
+
+    def test_aluminum_preheat_default(self):
+        assert recommended_shell_preheat_f("A356 Aluminum") == 1100
 
     def test_casting_yield(self):
         assert abs(casting_yield_pct(100, 25) - 80.0) < 1e-9
@@ -111,6 +140,75 @@ class TestWorkerFoundry:
         resin = run_sim({**BASE_PARAMS, "mold_type": "Resin / no-bake"})
         assert resin["t_solidify_min"] < green["t_solidify_min"]
 
+    def test_cold_ceramic_shell_solidifies_faster_than_green(self):
+        green = run_sim({**BASE_PARAMS, "mold_type": "Green sand", "mold_temp_f": 77})
+        shell = run_sim({
+            **BASE_PARAMS, "mold_type": "Ceramic shell",
+            "mold_temp_f": 77, "shell_mm": 8,
+        })
+        assert shell["t_solidify_min"] < green["t_solidify_min"]
+        assert shell["process"] == "shell"
+        assert shell["shell_mm"] == 8
+
+    def test_preheated_shell_solidifies_slower_than_cold_shell(self):
+        cold = run_sim({
+            **BASE_PARAMS, "mold_type": "Ceramic shell",
+            "mold_temp_f": 77, "shell_mm": 8,
+        })
+        hot = run_sim({
+            **BASE_PARAMS, "mold_type": "Ceramic shell",
+            "mold_temp_f": 1100, "shell_mm": 8,
+        })
+        assert hot["t_solidify_min"] > cold["t_solidify_min"]
+
+    def test_hot_shell_skips_burn_on(self):
+        r = run_sim({
+            **BASE_PARAMS, "mold_type": "Ceramic shell",
+            "mold_temp_f": 1100, "shell_mm": 8,
+        })
+        blob = " ".join(r["warnings"] + r["defects"]).lower()
+        assert "burn-on" not in blob
+
+    def test_sand_still_flags_burn_on(self):
+        r = run_sim({**BASE_PARAMS, "mold_type": "Green sand", "mold_temp_f": 200})
+        assert any("burn-on" in w.lower() for w in r["warnings"])
+
+    def test_hot_shell_skips_flask_warning(self):
+        r = run_sim({
+            **BASE_PARAMS, "mold_type": "Ceramic shell",
+            "mold_temp_f": 1100, "shell_mm": 8,
+            "flask_fit": {"fits": False, "need_w_in": 20, "need_d_in": 20, "suggested": "huge"},
+        })
+        assert not any("flask" in w.lower() for w in r["warnings"])
+
+    def test_thin_shell_warns_breakthrough(self):
+        r = run_sim({
+            **BASE_PARAMS, "mold_type": "Ceramic shell",
+            "mold_temp_f": 1100, "shell_mm": 4, "vol_cm3": 500,
+        })
+        blob = " ".join(r["warnings"] + r["defects"]).lower()
+        assert "breakthrough" in blob or "thin shell" in blob
+
+    def test_hot_shell_relaxes_thin_wall_cold_shut(self):
+        sand = run_sim({
+            **BASE_PARAMS, "thin_wall": True, "pour_temp_f": 1160,
+            "mold_type": "Green sand", "mold_temp_f": 77,
+        })
+        shell = run_sim({
+            **BASE_PARAMS, "thin_wall": True, "pour_temp_f": 1160,
+            "mold_type": "Ceramic shell", "mold_temp_f": 1100, "shell_mm": 8,
+        })
+        assert any("cold shut" in d.lower() for d in sand["defects"])
+        assert not any("cold shut" in d.lower() for d in shell["defects"])
+
+    def test_cold_shell_warns_preheat(self):
+        r = run_sim({
+            **BASE_PARAMS, "mold_type": "Ceramic shell",
+            "mold_temp_f": 200, "shell_mm": 8,
+        })
+        assert any("cold shell" in w.lower() or "preheat" in w.lower() for w in r["warnings"])
+        assert any("preheat" in (f.get("fix") or "").lower() for f in r["fixes"])
+
     def test_gating_metal_added_to_melt_mass(self):
         gating = {
             "has_sprue": True, "sprue_top_r": 8, "sprue_bot_r": 4,
@@ -123,8 +221,9 @@ class TestWorkerFoundry:
 
     def test_new_result_keys(self):
         r = run_sim(BASE_PARAMS)
-        for k in ("verdict", "fixes", "yield_pct", "gating_cm3", "mold_type", "part_mass_g"):
+        for k in ("verdict", "fixes", "yield_pct", "gating_cm3", "mold_type", "part_mass_g", "process"):
             assert k in r
+        assert r["process"] == "sand"
 
 
 class TestSession:
@@ -139,3 +238,16 @@ class TestSession:
             loaded = load_session(path)
         assert loaded["metal"] == "316 Stainless Steel"
         assert loaded["pour_temp_f"] == 2800
+
+    def test_ceramic_shell_round_trip(self):
+        data = default_session()
+        data["mold_type"] = "Ceramic shell"
+        data["shell_mm"] = 10
+        data["mold_temp_f"] = 1600
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "shell.cast.json")
+            save_session(path, data)
+            loaded = load_session(path)
+        assert loaded["mold_type"] == "Ceramic shell"
+        assert loaded["shell_mm"] == 10
+        assert loaded["mold_temp_f"] == 1600

@@ -100,9 +100,13 @@ def build_results_text(r: dict) -> str:
 
     rows.append(_section("INPUT"))
     rows.append(_row("Metal",     r.get("metal", "—")))
-    rows.append(_row("Mold",      r.get("mold_type", "Green sand")))
+    mold_label = r.get("mold_type", "Green sand")
+    if r.get("process") == "shell" and r.get("shell_mm"):
+        mold_label = f"{mold_label} ({r['shell_mm']:.0f} mm)"
+    rows.append(_row("Mold",      mold_label))
     rows.append(_row("Pour temp", f"{r.get('pour_f', 0):.0f} °F"))
-    rows.append(_row("Mold temp", f"{r.get('mold_f', 0):.0f} °F"))
+    mold_temp_name = "Shell preheat" if r.get("process") == "shell" else "Mold temp"
+    rows.append(_row(mold_temp_name, f"{r.get('mold_f', 0):.0f} °F"))
     rows.append(_row("Superheat", f"{superheat:.1f} °F", sh_color))
     rows.append(_divider())
 

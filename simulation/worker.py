@@ -1,9 +1,10 @@
 import math
 from PyQt6.QtCore import QObject, pyqtSignal
-from constants import METAL_DEFAULTS
+from constants import METAL_DEFAULTS, DEFAULT_SHELL_MM
 from simulation.foundry import (
-    mold_factor, gating_volumes_cm3, casting_yield_pct, riser_ok,
-    verdict_from_result, suggested_fixes,
+    gating_volumes_cm3, casting_yield_pct, riser_ok,
+    verdict_from_result, suggested_fixes, is_shell_mold, effective_mold_factor,
+    recommended_shell_preheat_f,
 )
 
 
@@ -119,7 +120,11 @@ class SimWorker(QObject):
 
         self.progress.emit(30, "Applying Chvorinov Rule")
         mold_name = p.get("mold_type", "Green sand")
-        B = chvorinov_B(metal, pour_f) * mold_factor(mold_name)
+        shell_mm = float(p.get("shell_mm", DEFAULT_SHELL_MM))
+        shell = is_shell_mold(mold_name)
+        B = chvorinov_B(metal, pour_f) * effective_mold_factor(
+            mold_name, shell_mm=shell_mm, mold_f=mold_f, pour_f=pour_f,
+        )
         t_solidify_min = B * (vsr ** 2)
 
         self.progress.emit(50, "Checking defect risks")
@@ -128,18 +133,45 @@ class SimWorker(QObject):
         defects: list[str] = []
         warnings: list[str] = []
 
-        if superheat < min_superheat:
+        rec_preheat = recommended_shell_preheat_f(metal_name) if shell else 0
+        hot_shell = shell and mold_f >= rec_preheat - 250
+        # A fired hot shell fills thin sections more easily than cold sand.
+        effective_min_sh = min_superheat
+        if hot_shell:
+            effective_min_sh = max(20.0, min_superheat * 0.55)
+
+        if superheat < effective_min_sh:
             defects.append(
-                f"Misrun risk — superheat {superheat:.0f} F below minimum {min_superheat} F"
+                f"Misrun risk — superheat {superheat:.0f} F below minimum {effective_min_sh:.0f} F"
             )
-        if thin_wall and pour_f < metal["melt_temp_f"] + 150:
+        cold_shut_need = metal["melt_temp_f"] + 150
+        if thin_wall and pour_f < cold_shut_need and not hot_shell:
             defects.append("Cold shut risk — thin wall with low superheat")
-        if mold_f > 120:
+        if not shell and mold_f > 120:
             warnings.append("Burn-on risk — mold temp above 120 F")
-        if superheat < min_superheat * 2:
+        if superheat < effective_min_sh * 2:
             warnings.append(
-                f"Low superheat — {superheat:.0f} F (recommended ≥ {min_superheat * 2} F)"
+                f"Low superheat — {superheat:.0f} F (recommended ≥ {effective_min_sh * 2:.0f} F)"
             )
+
+        if shell:
+            if shell_mm < 5.0:
+                warnings.append(
+                    f"Thin shell — {shell_mm:.0f} mm fired thickness risks metal breakthrough"
+                )
+            if shell_mm < 6.0 and vol_cm3 >= 400.0:
+                defects.append(
+                    f"Shell breakthrough risk — {shell_mm:.0f} mm shell is light for a "
+                    f"{vol_cm3:.0f} cm³ pour"
+                )
+            if mold_f > pour_f + 25:
+                warnings.append(
+                    f"Shell hotter than pour ({mold_f:.0f} °F > {pour_f:.0f} °F)"
+                )
+            elif mold_f < rec_preheat - 350:
+                warnings.append(
+                    f"Cold shell — preheat closer to {rec_preheat} °F for fill"
+                )
 
         self.progress.emit(70, "Computing gating hydraulics")
         fill_time_s, restrictive, fill_velocity_mm_s = (
@@ -168,7 +200,7 @@ class SimWorker(QObject):
             )
 
         flask_info = p.get("flask_fit") or {}
-        if flask_info.get("fits") is False:
+        if (not shell) and flask_info.get("fits") is False:
             sug = flask_info.get("suggested") or "a larger flask"
             warnings.append(
                 f"Flask is too small for the part + {flask_info.get('need_w_in', 0):.1f}×"
@@ -197,6 +229,8 @@ class SimWorker(QObject):
             "gating_volumes": gating_vols,
             "yield_pct": yield_pct,
             "mold_type": mold_name,
+            "shell_mm": shell_mm if shell else None,
+            "process": "shell" if shell else "sand",
             "riser": riser,
             "fill_time_s": fill_time_s,
             "fill_velocity_mm_s": fill_velocity_mm_s,

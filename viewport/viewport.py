@@ -21,7 +21,7 @@ except ImportError:
     from matplotlib.figure import Figure
 from constants import (COPE_COLOR, DRAG_COLOR, SPRUE_COLOR, RUNNER_COLOR,
                        GATE_COLOR, RISER_COLOR, MODEL_COLORS, METAL_PBR,
-                       DEFAULT_FLASK_HEIGHT_IN)
+                       DEFAULT_FLASK_HEIGHT_IN, SHELL_COLOR, DEFAULT_SHELL_MM)
 from simulation.mesh_tools import (
     inspect_mesh, invert_winding, qem_decimate, local_thickness,
     find_defect_sites, THIN_WALL_MM,
@@ -80,6 +80,8 @@ class Viewport3D(QWidget):
         self.gating: list     = []
         self.flask_size       = (8, 10)
         self.flask_height_in  = float(DEFAULT_FLASK_HEIGHT_IN)
+        self.mold_kind        = "sand"
+        self.shell_mm         = float(DEFAULT_SHELL_MM)
 
 
         self.sprue_offset  = np.array([0.0, 60.0])
@@ -241,36 +243,47 @@ class Viewport3D(QWidget):
             self._pv_gating_actors.clear()
             self._pv_gating_key = ()
             z_part = 50.0
-            self._draw_flask_outline_pv(z_part) if False else None
-            fw_mm = self.flask_size[0] * 25.4
-            fh_mm = self.flask_size[1] * 25.4
-            hw, hh = fw_mm / 2, fh_mm / 2
-            xs = [-hw, hw, hw, -hw, -hw]
-            ys = [-hh, -hh, hh, hh, -hh]
-            for z, col, lw in [(0.0, "#45475A", 2), (self.flask_height_in * 25.4, "#45475A", 2),
-                               (z_part, "#89B4FA", 3)]:
-                pts = np.column_stack([xs, ys, [z] * 5])
-                line = pv.PolyData(pts)
-                line.lines = np.array([len(xs), 0, 1, 2, 3, 4, 0])
-                self.plotter.add_mesh(line, color=col, line_width=lw)
+            if self.mold_kind == "shell":
+                self._draw_shell_outline_pv(z_part)
+            else:
+                fw_mm = self.flask_size[0] * 25.4
+                fh_mm = self.flask_size[1] * 25.4
+                hw, hh = fw_mm / 2, fh_mm / 2
+                xs = [-hw, hw, hw, -hw, -hw]
+                ys = [-hh, -hh, hh, hh, -hh]
+                for z, col, lw in [(0.0, "#45475A", 2), (self.flask_height_in * 25.4, "#45475A", 2),
+                                   (z_part, "#89B4FA", 3)]:
+                    pts = np.column_stack([xs, ys, [z] * 5])
+                    line = pv.PolyData(pts)
+                    line.lines = np.array([len(xs), 0, 1, 2, 3, 4, 0])
+                    self.plotter.add_mesh(line, color=col, line_width=lw)
             self.plotter.add_text(hint, position="upper_left", font_size=12, color="#A6ADC8")
             self.plotter.render()
         else:
             self.ax.cla()
             self._style_axes()
-            fw_mm = self.flask_size[0] * 25.4
-            fh_mm = self.flask_size[1] * 25.4
-            hw, hh = fw_mm / 2, fh_mm / 2
-            xs = [-hw, hw, hw, -hw, -hw]
-            ys = [-hh, -hh, hh, hh, -hh]
-            z_top = self.flask_height_in * 25.4
-            for z, color in [(0.0, "#45475A"), (z_top, "#45475A"), (z_top * 0.5, "#89B4FA")]:
-                self.ax.plot(xs, ys, [z] * 5, color=color, linestyle="--", linewidth=1.2, alpha=0.7)
-            self.ax.text(0, 0, z_top * 0.55, hint,
-                         ha="center", va="center", color="#A6ADC8", fontsize=11)
-            self.ax.set_xlim(-hw - 40, hw + 40)
-            self.ax.set_ylim(-hh - 40, hh + 40)
-            self.ax.set_zlim(-20, z_top + 40)
+            if self.mold_kind == "shell":
+                self._draw_shell_outline_mpl(z_part := 40.0)
+                xmin, xmax, ymin, ymax, zmin, zmax = self._shell_aabb()
+                self.ax.text(0, 0, (zmin + zmax) * 0.55, hint,
+                             ha="center", va="center", color="#A6ADC8", fontsize=11)
+                self.ax.set_xlim(xmin - 20, xmax + 20)
+                self.ax.set_ylim(ymin - 20, ymax + 20)
+                self.ax.set_zlim(zmin - 20, zmax + 20)
+            else:
+                fw_mm = self.flask_size[0] * 25.4
+                fh_mm = self.flask_size[1] * 25.4
+                hw, hh = fw_mm / 2, fh_mm / 2
+                xs = [-hw, hw, hw, -hw, -hw]
+                ys = [-hh, -hh, hh, hh, -hh]
+                z_top = self.flask_height_in * 25.4
+                for z, color in [(0.0, "#45475A"), (z_top, "#45475A"), (z_top * 0.5, "#89B4FA")]:
+                    self.ax.plot(xs, ys, [z] * 5, color=color, linestyle="--", linewidth=1.2, alpha=0.7)
+                self.ax.text(0, 0, z_top * 0.55, hint,
+                             ha="center", va="center", color="#A6ADC8", fontsize=11)
+                self.ax.set_xlim(-hw - 40, hw + 40)
+                self.ax.set_ylim(-hh - 40, hh + 40)
+                self.ax.set_zlim(-20, z_top + 40)
             self.canvas.draw_idle()
 
 
@@ -572,6 +585,10 @@ class Viewport3D(QWidget):
 
         half_w = fw_mm / 2 + PAD
         half_h = fh_mm / 2 + PAD
+        if self.mold_kind == "shell":
+            sx0, sx1, sy0, sy1, _, _ = self._shell_aabb()
+            half_w = max(abs(sx0), abs(sx1)) + PAD * 0.5
+            half_h = max(abs(sy0), abs(sy1)) + PAD * 0.5
         cx = half_w / self._zoom_factor
         cy = half_h / self._zoom_factor
         z_center = (zmin + zmax) / 2
@@ -661,30 +678,36 @@ class Viewport3D(QWidget):
                     self._pv_actors[name]["fill"] = factor
 
         # ----------------------------------------------------------------
-        # 4. Flask outline — cached, rebuild only when bounds/size change
+        # 4. Flask / ceramic-shell outline — cached, rebuild on bounds/size
         # ----------------------------------------------------------------
-        flask_key = (round(zmin, 1), round(zmax, 1), self.flask_size,
-                     round(self.flask_height_in, 2), round(z_part, 1))
+        flask_key = (
+            round(zmin, 1), round(zmax, 1), self.flask_size,
+            round(self.flask_height_in, 2), round(z_part, 1),
+            self.mold_kind, round(self.shell_mm, 1),
+        )
         if flask_key != self._pv_flask_key:
             for a in self._pv_flask_actors:
                 self.plotter.remove_actor(a)
             self._pv_flask_actors.clear()
             self._pv_flask_key = flask_key
-            fw_mm = self.flask_size[0] * 25.4
-            fh_mm = self.flask_size[1] * 25.4
-            hw, hh = fw_mm / 2, fh_mm / 2
-            xs = [-hw, hw, hw, -hw, -hw]
-            ys = [-hh, -hh, hh, hh, -hh]
-            z_bot, z_top = self._flask_z_extents(zmin, zmax)
-            for z, col, lw in [(z_bot, "#45475A", 2),
-                                (z_top, "#45475A", 2),
-                                (z_part,   "#89B4FA", 3)]:
-                pts  = np.column_stack([xs, ys, [z] * 5])
-                line = pv.PolyData(pts)
-                line.lines = np.array([len(xs), 0, 1, 2, 3, 4, 0])
-                self._pv_flask_actors.append(
-                    self.plotter.add_mesh(line, color=col, line_width=lw)
-                )
+            if self.mold_kind == "shell":
+                self._draw_shell_outline_pv(z_part)
+            else:
+                fw_mm = self.flask_size[0] * 25.4
+                fh_mm = self.flask_size[1] * 25.4
+                hw, hh = fw_mm / 2, fh_mm / 2
+                xs = [-hw, hw, hw, -hw, -hw]
+                ys = [-hh, -hh, hh, hh, -hh]
+                z_bot, z_top = self._flask_z_extents(zmin, zmax)
+                for z, col, lw in [(z_bot, "#45475A", 2),
+                                    (z_top, "#45475A", 2),
+                                    (z_part,   "#89B4FA", 3)]:
+                    pts  = np.column_stack([xs, ys, [z] * 5])
+                    line = pv.PolyData(pts)
+                    line.lines = np.array([len(xs), 0, 1, 2, 3, 4, 0])
+                    self._pv_flask_actors.append(
+                        self.plotter.add_mesh(line, color=col, line_width=lw)
+                    )
 
         # ----------------------------------------------------------------
         # 5. Gating actors — cached by config key, rebuild on change
@@ -722,6 +745,9 @@ class Viewport3D(QWidget):
 
 
     def _draw_flask_outline(self, z_part: float):
+        if self.mold_kind == "shell":
+            self._draw_shell_outline_mpl(z_part)
+            return
         fw_mm = self.flask_size[0] * 25.4
         fh_mm = self.flask_size[1] * 25.4
         hw, hh = fw_mm / 2, fh_mm / 2
@@ -746,11 +772,35 @@ class Viewport3D(QWidget):
             P3(plane_verts, facecolors=[(0.537, 0.706, 0.980, 0.08)],
                edgecolors="none"))
 
+    def _draw_shell_outline_mpl(self, z_part: float):
+        xmin, xmax, ymin, ymax, zmin, zmax = self._shell_aabb()
+        from mpl_toolkits.mplot3d.art3d import Poly3DCollection as P3
+        rgb = self._hex_to_rgb(SHELL_COLOR)
+        faces = self._box_faces(xmin, xmax, ymin, ymax, zmin, zmax)
+        self.ax.add_collection3d(
+            P3(faces, facecolors=[rgb + (0.12,)] * 6, edgecolors=SHELL_COLOR,
+               linewidths=0.8, alpha=0.12)
+        )
+        corners, edges = self._box_edges(xmin, xmax, ymin, ymax, zmin, zmax)
+        for a, b in edges:
+            p0, p1 = corners[a], corners[b]
+            self.ax.plot([p0[0], p1[0]], [p0[1], p1[1]], [p0[2], p1[2]],
+                         color=SHELL_COLOR, linewidth=1.1, alpha=0.85)
+        self.ax.plot(
+            [xmin, xmax, xmax, xmin, xmin],
+            [ymin, ymin, ymax, ymax, ymin],
+            [z_part] * 5,
+            color="#89B4FA", linewidth=1.6, alpha=0.7,
+        )
+
 
 
     def _draw_flask_outline_pv(self, z_part: float):
 
         """Draw flask outline using PyVista."""
+        if self.mold_kind == "shell":
+            self._draw_shell_outline_pv(z_part)
+            return
 
         fw_mm = self.flask_size[0] * 25.4
         fh_mm = self.flask_size[1] * 25.4
@@ -777,6 +827,24 @@ class Viewport3D(QWidget):
         line = pv.PolyData(points)
         line.lines = np.array([len(xs), 0, 1, 2, 3, 4, 0])
         self.plotter.add_mesh(line, color="#89B4FA", line_width=3)
+
+    def _draw_shell_outline_pv(self, z_part: float):
+        xmin, xmax, ymin, ymax, zmin, zmax = self._shell_aabb()
+        box = pv.Box(bounds=(xmin, xmax, ymin, ymax, zmin, zmax))
+        self._pv_flask_actors.append(
+            self.plotter.add_mesh(
+                box, color=SHELL_COLOR, opacity=0.12, show_edges=True,
+                edge_color=SHELL_COLOR, line_width=1,
+            )
+        )
+        xs = [xmin, xmax, xmax, xmin, xmin]
+        ys = [ymin, ymin, ymax, ymax, ymin]
+        pts = np.column_stack([xs, ys, [z_part] * 5])
+        line = pv.PolyData(pts)
+        line.lines = np.array([len(xs), 0, 1, 2, 3, 4, 0])
+        self._pv_flask_actors.append(
+            self.plotter.add_mesh(line, color="#89B4FA", line_width=2)
+        )
 
 
 
@@ -1341,6 +1409,35 @@ class Viewport3D(QWidget):
         z_top = max(zmax + 10.0, z_bot + float(self.flask_height_in) * 25.4)
         return z_bot, z_top
 
+    def _shell_aabb(self) -> tuple[float, float, float, float, float, float]:
+        xmin, xmax, ymin, ymax, zmin, zmax = self._compute_bounds()
+        if not self.models:
+            xmin, xmax, ymin, ymax, zmin, zmax = -40.0, 40.0, -40.0, 40.0, 0.0, 80.0
+        t = float(self.shell_mm)
+        return xmin - t, xmax + t, ymin - t, ymax + t, zmin - t, zmax + t
+
+    def _box_edges(self, xmin, xmax, ymin, ymax, zmin, zmax):
+        corners = [
+            (xmin, ymin, zmin), (xmax, ymin, zmin), (xmax, ymax, zmin), (xmin, ymax, zmin),
+            (xmin, ymin, zmax), (xmax, ymin, zmax), (xmax, ymax, zmax), (xmin, ymax, zmax),
+        ]
+        edges = [
+            (0, 1), (1, 2), (2, 3), (3, 0),
+            (4, 5), (5, 6), (6, 7), (7, 4),
+            (0, 4), (1, 5), (2, 6), (3, 7),
+        ]
+        return corners, edges
+
+    def _box_faces(self, xmin, xmax, ymin, ymax, zmin, zmax):
+        return [
+            [[xmin, ymin, zmin], [xmax, ymin, zmin], [xmax, ymax, zmin], [xmin, ymax, zmin]],
+            [[xmin, ymin, zmax], [xmax, ymin, zmax], [xmax, ymax, zmax], [xmin, ymax, zmax]],
+            [[xmin, ymin, zmin], [xmax, ymin, zmin], [xmax, ymin, zmax], [xmin, ymin, zmax]],
+            [[xmin, ymax, zmin], [xmax, ymax, zmin], [xmax, ymax, zmax], [xmin, ymax, zmax]],
+            [[xmin, ymin, zmin], [xmin, ymax, zmin], [xmin, ymax, zmax], [xmin, ymin, zmax]],
+            [[xmax, ymin, zmin], [xmax, ymax, zmin], [xmax, ymax, zmax], [xmax, ymin, zmax]],
+        ]
+
     def _sprue_z_and_height(self, z_part: float, zmax: float) -> tuple[float, float]:
         """Sprue sits on the parting plane and rises through the cope to the basin."""
         cope = max(0.0, float(zmax) - float(z_part))
@@ -1631,6 +1728,13 @@ class Viewport3D(QWidget):
             self.flask_height_in = float(height_in)
         elif len(size_tuple) >= 3:
             self.flask_height_in = float(size_tuple[2])
+        self.render(self._anim_frac)
+
+    def set_mold_process(self, kind: str, shell_mm: float | None = None) -> None:
+        self.mold_kind = "shell" if kind == "shell" else "sand"
+        if shell_mm is not None:
+            self.shell_mm = float(shell_mm)
+        self._pv_flask_key = ()
         self.render(self._anim_frac)
 
 
