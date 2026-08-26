@@ -273,9 +273,18 @@ def open_riser_modulus_cm(radius_mm: float = _RISER_R_MM, height_mm: float = _RI
     return vol / max(area, 1e-9)
 
 
-def riser_ok(part_vsr_cm: float, has_riser: bool, safety: float = 1.2) -> dict:
+def riser_ok(
+    part_vsr_cm: float,
+    has_riser: bool,
+    safety: float = 1.2,
+    radius_mm: float | None = None,
+    height_mm: float | None = None,
+) -> dict:
     """Compare an open riser's modulus to the part V/A (hot-spot proxy)."""
-    m_riser = open_riser_modulus_cm()
+    m_riser = open_riser_modulus_cm(
+        radius_mm if radius_mm is not None else _RISER_R_MM,
+        height_mm if height_mm is not None else _RISER_H_MM,
+    )
     need = float(part_vsr_cm) * safety
     adequate = bool(has_riser) and m_riser + 1e-9 >= need
     return {
@@ -347,6 +356,12 @@ def suggested_fixes(r: dict, gating: dict | None = None) -> list[dict]:
                 "text": d,
                 "fix": f"Pour at ≥ {target:.0f} °F, or thicken walls above 6 mm.",
             })
+        elif "porosity" in low or "isolated" in low:
+            fixes.append({
+                "kind": "shrinkage_risk",
+                "text": d,
+                "fix": "Place a riser on the hot spot, or click a chill onto the thick section.",
+            })
         else:
             fixes.append({"kind": "other", "text": d, "fix": ""})
 
@@ -414,6 +429,24 @@ def suggested_fixes(r: dict, gating: dict | None = None) -> list[dict]:
                 "kind": "shrinkage_risk",
                 "text": w,
                 "fix": "Use a larger open riser (or a side riser on the hot spot).",
+            })
+        elif "erosion" in low:
+            fixes.append({
+                "kind": "erosion",
+                "text": w,
+                "fix": "Widen the gate / sprue exit, or drop the sprue height to cut velocity.",
+            })
+        elif "isolated" in low or "hot-spot porosity" in low or "last-to-freeze" in low:
+            fixes.append({
+                "kind": "shrinkage_risk",
+                "text": w,
+                "fix": "Move the riser onto the hot spot, or add a chill on the thick section.",
+            })
+        elif "never filled" in low or "gravity flood" in low:
+            fixes.append({
+                "kind": "misrun_risk",
+                "text": w,
+                "fix": "Place the gate lower, or add a second gate on the unfilled lobe.",
             })
         elif "flask" in low:
             fixes.append({

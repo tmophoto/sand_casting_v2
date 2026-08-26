@@ -280,3 +280,54 @@ class TestRobustness:
         html = empty_results_html()
         assert "Ready when you are" in html
         assert "Simulate" in html
+
+
+class TestShopTickets:
+
+    def test_melt_ticket_section(self):
+        text = build({
+            "melt_ticket": {
+                "pour_mass_g": 534.0, "pour_mass_lb": 1.18, "n_ingots": 2,
+                "ingot_lb": 1.0, "furnace_lb": 12.0, "furnace_fits": True,
+                "usd_per_lb": 2.40, "alloy_usd": 2.83,
+            }
+        })
+        assert "MELT TICKET" in text
+        assert "Fits" in text
+        assert "Ingots" in text
+
+    def test_furnace_too_big_flag(self):
+        text = build({
+            "melt_ticket": {
+                "pour_mass_g": 8000.0, "pour_mass_lb": 17.6, "n_ingots": 18,
+                "ingot_lb": 1.0, "furnace_lb": 12.0, "furnace_fits": False,
+                "usd_per_lb": 2.4, "alloy_usd": 42.0,
+            }
+        })
+        assert "TOO BIG" in text
+
+    def test_pattern_ticket_section(self):
+        text = build({
+            "pattern_ticket": {
+                "catalog_shrink_pct": 6.0, "print_scale": 1.06, "print_pct": 6.0,
+            }
+        })
+        assert "PATTERN TICKET" in text
+        assert "×1.060" in text or "1.060" in text
+
+    def test_compare_section(self):
+        text = build({
+            "compare": {
+                "a_label": "sand", "b_label": "shell",
+                "fill_time_s": {"a": 4.0, "b": 5.5, "d": 1.5},
+                "yield_pct": {"a": 70.0, "b": 55.0, "d": -15.0},
+            }
+        })
+        assert "COMPARE" in text
+        assert "sand" in text
+        assert "shell" in text
+
+    def test_unfed_hotspot_row(self):
+        text = build({"porosity_frac": 0.08})
+        assert "Unfed hot-spot" in text
+

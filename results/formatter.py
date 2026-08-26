@@ -94,7 +94,7 @@ def empty_results_html() -> str:
         f'<div style="color:{_C["label"]};font-size:12px;line-height:1.55;">'
         f'1. Drop a part (STL or OBJ) or try the demo<br>'
         f'2. Pick sand or ceramic shell<br>'
-        f'3. Place a sprue and gate<br>'
+        f'3. Click a face to drop a sprue, or hit Size gating<br>'
         f'4. Hit <b style="color:{_C["value"]};">Simulate pour</b>'
         f'</div></body></html>'
     )
@@ -171,7 +171,59 @@ def build_results_text(r: dict) -> str:
     rows.append(_row("Fill OK?",     fill_ok_str, fill_ok_color))
     rows.append(_row("Solidify",     f"{r.get('t_solidify_min', 0):.2f} min"))
     rows.append(_row("Cooling",      cr_str))
+    if r.get("porosity_frac") is not None:
+        pf = float(r["porosity_frac"])
+        pc = _C["defect"] if pf >= 0.05 else (_C["warn"] if pf >= 0.02 else _C["ok"])
+        rows.append(_row("Unfed hot-spot", f"{100 * pf:.0f} % of volume", pc))
+    if r.get("niyama_min") is not None:
+        rows.append(_row("Niyama (min)", f"{r['niyama_min']:.2f}"))
     rows.append(_divider())
+
+    mt = r.get("melt_ticket") or {}
+    if mt:
+        rows.append(_section("MELT TICKET"))
+        rows.append(_row("Pour weight", f"{mt.get('pour_mass_lb', 0):.2f} lb  ({mt.get('pour_mass_g', 0):.0f} g)"))
+        rows.append(_row("Ingots", f"{mt.get('n_ingots', 0)} × {mt.get('ingot_lb', 1):.1f} lb"))
+        fits = mt.get("furnace_fits", True)
+        rows.append(_row(
+            "Furnace",
+            f"{'Fits' if fits else 'TOO BIG for'} {mt.get('furnace_lb', 12):.0f} lb crucible",
+            _C["ok"] if fits else _C["defect"],
+        ))
+        if mt.get("usd_per_lb"):
+            rows.append(_row("Alloy $", f"${mt.get('alloy_usd', 0):.2f}  (${mt['usd_per_lb']:.2f}/lb)"))
+        rows.append(_divider())
+
+    pt = r.get("pattern_ticket") or {}
+    if pt:
+        rows.append(_section("PATTERN TICKET"))
+        rows.append(_row("Catalog shrink", f"{pt.get('catalog_shrink_pct', 0):.1f} %"))
+        rows.append(_row("Print this STL", f"×{pt.get('print_scale', 1):.3f}  ({pt.get('print_pct', 0):+.1f}%)"))
+        rows.append(_divider())
+
+    cmpd = r.get("compare") or {}
+    if cmpd:
+        rows.append(_section(f"COMPARE  {html.escape(str(cmpd.get('a_label', 'A')))} → {html.escape(str(cmpd.get('b_label', 'B')))}"))
+        for key, label in (
+            ("fill_time_s", "Fill"),
+            ("t_solidify_min", "Solidify"),
+            ("yield_pct", "Yield"),
+            ("porosity_frac", "Unfed"),
+        ):
+            item = cmpd.get(key)
+            if not item:
+                continue
+            d = item["d"]
+            if key == "porosity_frac":
+                txt = f"{100 * item['a']:.0f}% → {100 * item['b']:.0f}%  ({100 * d:+.0f} pt)"
+            elif key == "yield_pct":
+                txt = f"{item['a']:.0f}% → {item['b']:.0f}%  ({d:+.0f} pt)"
+            elif key == "t_solidify_min":
+                txt = f"{item['a']:.2f} → {item['b']:.2f} min  ({d:+.2f})"
+            else:
+                txt = f"{item['a']:.1f} → {item['b']:.1f} s  ({d:+.1f})"
+            rows.append(_row(label, txt))
+        rows.append(_divider())
 
     if fixes:
         rows.append(_section("WHAT TO CHANGE"))

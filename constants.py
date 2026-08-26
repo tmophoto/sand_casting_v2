@@ -154,3 +154,79 @@ METAL_PBR = {
 def shrink_scale_from_slider(slider_value: int) -> float:
     """Map the 100–110 shrinkage slider onto a linear scale factor (1.00–1.10)."""
     return slider_value / 100.0
+
+
+FERROUS_METALS = {
+    "Gray Iron (ASTM A48)",
+    "Ductile Iron (65-45-12)",
+    "316 Stainless Steel",
+}
+
+CHILL_COLOR = "#89DCEB"
+
+# Gate velocity above this (mm/s) is treated as mold-erosion risk
+EROSION_VEL_SAND_MM_S = 500.0
+EROSION_VEL_SHELL_MM_S = 750.0
+
+# Melt ticket defaults (hobby crucible)
+LB_G = 453.592
+DEFAULT_INGOT_LB = 1.0
+DEFAULT_FURNACE_LB = 12.0
+ALLOY_USD_PER_LB = {
+    "A356 Aluminum": 2.40,
+    "Everdur Bronze (C52100)": 6.50,
+    "Gray Iron (ASTM A48)": 0.90,
+    "Ductile Iron (65-45-12)": 1.20,
+    "316 Stainless Steel": 4.80,
+}
+
+# Named shop recipes — metal + process + temps in one click
+SHOP_RECIPES = {
+    "A356 green sand": {
+        "metal": "A356 Aluminum",
+        "process": "sand",
+        "mold_type": "Green sand",
+        "pour_temp_f": 1300,
+        "mold_temp_f": 100,
+        "gating_ratio": "1 : 2 : 2 (non-ferrous)",
+        "thin_wall": "Auto",
+    },
+    "A356 ceramic shell": {
+        "metal": "A356 Aluminum",
+        "process": "shell",
+        "mold_type": "Ceramic shell",
+        "pour_temp_f": 1300,
+        "mold_temp_f": 1100,
+        "shell_mm": 8,
+        "gating_ratio": "1 : 2 : 2 (non-ferrous)",
+        "thin_wall": "Auto",
+    },
+    "Bronze green sand": {
+        "metal": "Everdur Bronze (C52100)",
+        "process": "sand",
+        "mold_type": "Green sand",
+        "pour_temp_f": 1950,
+        "mold_temp_f": 100,
+        "gating_ratio": "1 : 2 : 2 (non-ferrous)",
+        "thin_wall": "Auto",
+    },
+    "Bronze ceramic shell": {
+        "metal": "Everdur Bronze (C52100)",
+        "process": "shell",
+        "mold_type": "Ceramic shell",
+        "pour_temp_f": 1950,
+        "mold_temp_f": 1600,
+        "shell_mm": 8,
+        "gating_ratio": "1 : 2 : 2 (non-ferrous)",
+        "thin_wall": "Auto",
+    },
+    "Gray iron sand": {
+        "metal": "Gray Iron (ASTM A48)",
+        "process": "sand",
+        "mold_type": "Green sand",
+        "pour_temp_f": 2600,
+        "mold_temp_f": 100,
+        "gating_ratio": "1 : 4 : 4 (ferrous)",
+        "thin_wall": "No",
+    },
+}

@@ -1,11 +1,15 @@
 import math
 from PyQt6.QtCore import QObject, pyqtSignal
-from constants import METAL_DEFAULTS, DEFAULT_SHELL_MM
+from constants import (
+    METAL_DEFAULTS, DEFAULT_SHELL_MM,
+    EROSION_VEL_SAND_MM_S, EROSION_VEL_SHELL_MM_S,
+)
 from simulation.foundry import (
     gating_volumes_cm3, casting_yield_pct, riser_ok,
     verdict_from_result, suggested_fixes, is_shell_mold, effective_mold_factor,
     recommended_shell_preheat_f,
 )
+from simulation.shop import melt_ticket, pattern_ticket
 
 
 def volumetric_heat_j_cm3(metal: dict, pour_f: float) -> float:
@@ -187,7 +191,11 @@ class SimWorker(QObject):
         pour_mass_g = (vol_cm3 + gating_cm3) * float(metal["density"])
         part_mass_g = vol_cm3 * float(metal["density"])
 
-        riser = riser_ok(vsr, has_riser)
+        riser = riser_ok(
+            vsr, has_riser,
+            radius_mm=gating_params.get("riser_r_mm"),
+            height_mm=gating_params.get("riser_h_mm"),
+        )
         if riser["needed"] and not has_riser:
             if not any("riser" in w.lower() or "porosity" in w.lower() for w in warnings):
                 warnings.append(
@@ -199,6 +207,13 @@ class SimWorker(QObject):
                 f"{riser['m_riser_cm']:.2f} cm < {riser['m_need_cm']:.2f} cm needed"
             )
 
+        erosion_lim = EROSION_VEL_SHELL_MM_S if shell else EROSION_VEL_SAND_MM_S
+        if fill_velocity_mm_s > erosion_lim:
+            warnings.append(
+                f"Mold erosion risk — gate velocity {fill_velocity_mm_s:.0f} mm/s "
+                f"exceeds {erosion_lim:.0f} mm/s for this mould"
+            )
+
         flask_info = p.get("flask_fit") or {}
         if (not shell) and flask_info.get("fits") is False:
             sug = flask_info.get("suggested") or "a larger flask"
@@ -206,6 +221,53 @@ class SimWorker(QObject):
                 f"Flask is too small for the part + {flask_info.get('need_w_in', 0):.1f}×"
                 f"{flask_info.get('need_d_in', 0):.1f} in envelope — try {sug}"
             )
+
+        self.progress.emit(82, "Voxel fill / freeze")
+        voxel_faces: dict = {}
+        porosity_frac = 0.0
+        n_porosity = 0
+        n_unfilled = 0
+        niyama_min = None
+        mesh = p.get("mesh_vectors")
+        if mesh is not None:
+            try:
+                from simulation.voxels import analyze as voxel_analyze
+                vx = voxel_analyze(
+                    mesh, B,
+                    gate_xyz=p.get("gate_xyz"),
+                    riser_xyz=p.get("riser_xyz"),
+                    sprue_xyz=p.get("sprue_xyz"),
+                    chills_xyz=p.get("chills_xyz") or None,
+                    sleeve=bool(p.get("sleeve")),
+                )
+                porosity_frac = float(vx.get("porosity_frac") or 0.0)
+                n_porosity = int(vx.get("n_porosity") or 0)
+                n_unfilled = int(vx.get("n_unfilled") or 0)
+                ny = vx.get("face_niyama")
+                if ny is not None and len(ny):
+                    niyama_min = float(ny.min())
+                voxel_faces = {
+                    "fill": vx.get("face_fill"),
+                    "freeze": vx.get("face_freeze"),
+                    "porosity": vx.get("face_porosity"),
+                    "niyama": vx.get("face_niyama"),
+                    "dist": vx.get("face_dist"),
+                }
+                if n_unfilled > 0:
+                    warnings.append(
+                        f"Misrun (gravity flood) — {n_unfilled} cavity cells never filled from the gate"
+                    )
+                if porosity_frac >= 0.05:
+                    defects.append(
+                        f"Isolated-liquid porosity — {100 * porosity_frac:.0f}% of the volume "
+                        "freezes without a feeder path"
+                    )
+                elif porosity_frac >= 0.02:
+                    warnings.append(
+                        f"Hot-spot porosity risk — {100 * porosity_frac:.0f}% last-to-freeze is unfed"
+                    )
+            except Exception:
+                voxel_faces = {}
 
         self.progress.emit(90, "Assembling results")
 
@@ -252,6 +314,19 @@ class SimWorker(QObject):
         }
         result["verdict"] = verdict_from_result(result)
         result["fixes"] = suggested_fixes(result, gating_params)
+        result["melt_ticket"] = melt_ticket(pour_mass_g, metal_name)
+        result["pattern_ticket"] = pattern_ticket(
+            metal_name, shrink_slider=int(round(shrink_scale * 100)),
+        )
+        result["porosity_frac"] = porosity_frac
+        result["n_porosity"] = n_porosity
+        result["n_unfilled"] = n_unfilled
+        result["niyama_min"] = niyama_min
+        result["n_warnings"] = len(warnings)
+        result["setup_label"] = p.get("setup_label") or (
+            f"{'shell' if shell else 'sand'} · {metal_name}"
+        )
+        result["voxel_faces"] = voxel_faces
 
         self.progress.emit(100, "Done.")
         self.finished.emit(result)

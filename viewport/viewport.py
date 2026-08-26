@@ -20,7 +20,8 @@ except ImportError:
     from matplotlib.figure import Figure
 from constants import (COPE_COLOR, DRAG_COLOR, SPRUE_COLOR, RUNNER_COLOR,
                        GATE_COLOR, RISER_COLOR, MODEL_COLORS, METAL_PBR,
-                       DEFAULT_FLASK_HEIGHT_IN, SHELL_COLOR, DEFAULT_SHELL_MM)
+                       DEFAULT_FLASK_HEIGHT_IN, SHELL_COLOR, DEFAULT_SHELL_MM,
+                       CHILL_COLOR)
 from simulation.mesh_tools import (
     inspect_mesh, invert_winding, qem_decimate, local_thickness,
     find_defect_sites, THIN_WALL_MM, load_mesh_vectors,
@@ -62,6 +63,7 @@ class Viewport3D(QWidget):
     model_moved = pyqtSignal(dict)
     gating_selected = pyqtSignal(str)
     parting_picked = pyqtSignal(float)
+    gating_list_changed = pyqtSignal(list)
     drag_began = pyqtSignal()
 
 
@@ -97,12 +99,19 @@ class Viewport3D(QWidget):
         self.runner_height       = 8.0    # cross-section height
         self.runner_diameter     = 12.0   # legacy circular approx; unused when width/height set
         self.gate_area           = 40.0
+        self.riser_radius        = 20.0
+        self.riser_height        = 60.0
+        self.chills: list        = []
         self.shrink_scale        = 1.0
         self.show_as_cast        = False
         self.selected_gating     = ""
-        self.pick_mode           = ""          # "", "parting"
-        self.overlay_mode        = ""          # "", "draft", "undercut"
+        self.pick_mode           = ""          # "", "parting", "sprue", "gate", "riser", "chill"
+        self.overlay_mode        = ""          # "", "draft", "undercut", "hotspot", "freeze", "fill", "porosity", "niyama"
         self.restrictive_elem    = ""
+        self.clip_enabled        = False
+        self.clip_axis           = 0           # 0=X 1=Y 2=Z
+        self.clip_frac           = 0.5
+        self._sim_fields: dict   = {}
         self._clock_fill_s       = 0.0
         self._clock_solidify_min = 0.0
 
@@ -533,6 +542,11 @@ class Viewport3D(QWidget):
             cope_mask   = centroids_z >= z_part
             cope_verts  = verts[cope_mask]
             drag_verts  = verts[~cope_mask]
+            if self.clip_enabled:
+                if len(cope_verts):
+                    cope_verts = cope_verts[self._clip_mask(cope_verts)]
+                if len(drag_verts):
+                    drag_verts = drag_verts[self._clip_mask(drag_verts)]
 
             cope_colors = [cope_base + (1.0,)] * len(cope_verts)
             drag_colors = [drag_base + (1.0,)] * len(drag_verts)
@@ -560,12 +574,14 @@ class Viewport3D(QWidget):
                     colls["drag"].set_facecolor(drag_colors)
 
             # Fill / solidification overlay
-            if self.overlay_mode:
+            if self.overlay_mode in ("draft", "undercut"):
                 self._add_mpl_inspect_overlay(name, verts)
+            elif self.overlay_mode:
+                self._add_mpl_result_overlay(name, verts)
             elif self._solidify_frac > 0:
                 self._add_mpl_solidify_overlay(name, verts)
             elif anim_frac > 0:
-                fill_mask = self._fill_mask(verts, anim_frac)
+                fill_mask = self._fill_mask(verts, anim_frac) & self._clip_mask(verts)
                 if np.any(fill_mask):
                     heat_colors = self._compute_heat_colors(verts, anim_frac)
                     self.ax.add_collection3d(
@@ -574,6 +590,8 @@ class Viewport3D(QWidget):
                                          edgecolors="none"))
 
         self._draw_flask_outline(z_part)
+        if self.clip_enabled:
+            self._draw_clip_plane_mpl()
 
         if self.models:
             self._draw_gating(z_part)
@@ -654,14 +672,18 @@ class Viewport3D(QWidget):
         if anim_frac > 0 or self._solidify_frac > 0 or self.overlay_mode:
             for name, data in self.models.items():
                 verts = self._apply_transform(data["render_data"], self.transforms[name])
-                if self.overlay_mode:
+                keep = self._clip_mask(verts)
+                if self.overlay_mode in ("draft", "undercut"):
                     self._add_pv_inspect_overlay(name, verts)
+                    continue
+                if self.overlay_mode:
+                    self._add_pv_result_overlay(name, verts)
                     continue
                 if self._solidify_frac > 0:
                     self._add_pv_solidify_overlay(name, verts)
                     continue
                 heat_colors = self._compute_heat_colors(verts, anim_frac)
-                fill_mask   = self._fill_mask(verts, anim_frac)
+                fill_mask   = self._fill_mask(verts, anim_frac) & keep
                 if fill_mask.sum() > 0:
                     fv     = verts[fill_mask]
                     n_f    = len(fv)
@@ -717,9 +739,12 @@ class Viewport3D(QWidget):
             tuple(float(v) for v in self.sprue_offset),
             round(self.runner_y_offset, 2),
             tuple(float(v) for v in self.riser_offset),
-            self.sprue_top_radius, self.sprue_bottom_radius,
+            self.sprue_top_radius,
+            self.sprue_bottom_radius,
             self.sprue_height, self.runner_width, self.runner_height,
             self.runner_length, self.gate_area, self.selected_gating, self.restrictive_elem,
+            round(self.riser_radius, 2), round(self.riser_height, 2),
+            len(self.chills),
         )
         if gating_key != self._pv_gating_key:
             for a in self._pv_gating_actors:
@@ -738,6 +763,7 @@ class Viewport3D(QWidget):
             self._draw_sprue_particles_pv(z_part, anim_frac)
         self._draw_choke_marker_pv(z_part, zmax)
         self._draw_clock_pv()
+        self._draw_clip_plane_pv()
 
         self.plotter.render()
 
@@ -944,17 +970,21 @@ class Viewport3D(QWidget):
             rx, ry = self.riser_offset
             faces = self._make_cylinder_mesh(
                 cx=rx, cy=ry, z_bottom=z_part,
-                r_bottom=20.0, r_top=20.0, height=60.0, sides=24,
+                r_bottom=self.riser_radius, r_top=self.riser_radius,
+                height=self.riser_height, sides=24,
             )
             self._add_pv_gating_mesh(faces, *_gating_colors["Riser (Open)"])
 
         if "Fan Gate" in self.gating:
             sx, sy = self.sprue_offset
+            gw, gd, gh = self._gate_box()
             faces = self._make_box_mesh(
-                cx=sx, cy=sy - 4.0, z_bottom=z_part - 3.0,
-                width=60.0, depth=8.0, height=6.0,
+                cx=sx, cy=sy - gd / 2.0, z_bottom=z_part - gh / 2.0,
+                width=gw, depth=gd, height=gh,
             )
             self._add_pv_gating_mesh(faces, *_gating_colors["Fan Gate"])
+
+        self._add_pv_chills(z_part)
 
     def _add_pv_gating_mesh(self, faces: np.ndarray, color: str,
                              opacity: float) -> None:
@@ -996,6 +1026,9 @@ class Viewport3D(QWidget):
             self.runner_height,
             self.runner_length,
             self.selected_gating,
+            round(self.riser_radius, 2),
+            round(self.riser_height, 2),
+            round(self.gate_area, 1),
         )
         if cache_key != self._gating_cache_key:
             self._gating_geo_cache.clear()
@@ -1047,7 +1080,8 @@ class Viewport3D(QWidget):
             def _build_riser():
                 faces = self._make_cylinder_mesh(
                     cx=rx, cy=ry, z_bottom=z_part,
-                    r_bottom=20.0, r_top=20.0, height=60.0, sides=24,
+                    r_bottom=self.riser_radius, r_top=self.riser_radius,
+                    height=self.riser_height, sides=24,
                 )
                 colors = self._shade_faces(faces, self._hex_to_rgb(RISER_COLOR), alpha=0.75)
                 return faces, colors
@@ -1060,9 +1094,10 @@ class Viewport3D(QWidget):
         if "Fan Gate" in self.gating:
             sx, sy = self.sprue_offset
             def _build_gate():
+                gw, gd, gh = self._gate_box()
                 faces = self._make_box_mesh(
-                    cx=sx, cy=sy - 4.0, z_bottom=z_part - 3.0,
-                    width=60.0, depth=8.0, height=6.0,
+                    cx=sx, cy=sy - gd / 2.0, z_bottom=z_part - gh / 2.0,
+                    width=gw, depth=gd, height=gh,
                 )
                 colors = self._shade_faces(faces, self._hex_to_rgb(GATE_COLOR), alpha=0.85)
                 return faces, colors
@@ -1070,6 +1105,8 @@ class Viewport3D(QWidget):
             self.ax.add_collection3d(Poly3DCollection(
                 faces, facecolors=colors[:, :3], edgecolor="none", shade=True
             ))
+
+        self._draw_chills_mpl(z_part)
 
 
 
@@ -1454,11 +1491,234 @@ class Viewport3D(QWidget):
         return np.array([sx, sy, z_part], dtype=np.float64)
 
     def _fill_mask(self, verts: np.ndarray, anim_frac: float) -> np.ndarray:
-        """Fill from the gate outward (distance), not as a rising bath."""
+        """Fill from the gate outward (voxel flood order, else distance)."""
+        field = self._face_sim_field(verts, "fill")
+        if field is not None and len(field) == len(verts):
+            mx = max(float(np.max(field)), 1.0)
+            return field / mx <= max(float(anim_frac), 0.0)
         centroids = verts.mean(axis=1)
         d = np.linalg.norm(centroids - self._gate_xyz(), axis=1)
         dmax = max(float(d.max()), 1e-6)
         return d / dmax <= max(float(anim_frac), 0.0)
+
+    def _gate_box(self) -> tuple[float, float, float]:
+        """Fan-gate width × depth × height from hydraulic area."""
+        area = max(float(self.gate_area), 10.0)
+        height = 6.0
+        width = float(min(80.0, max(20.0, math.sqrt(area * 4.0))))
+        depth = float(min(16.0, max(4.0, area / max(width, 1.0))))
+        return width, depth, height
+
+    def _clip_mask(self, verts: np.ndarray) -> np.ndarray:
+        if verts is None or len(verts) == 0:
+            return np.zeros(0, dtype=bool)
+        if not self.clip_enabled:
+            return np.ones(len(verts), dtype=bool)
+        axis = int(self.clip_axis) % 3
+        cents = verts.mean(axis=1)
+        xmin, xmax, ymin, ymax, zmin, zmax = self._compute_bounds()
+        lo = (xmin, ymin, zmin)[axis]
+        hi = (xmax, ymax, zmax)[axis]
+        plane = lo + float(self.clip_frac) * max(hi - lo, 1.0)
+        return cents[:, axis] <= plane + 1e-6
+
+    def _clip_plane_geom(self) -> tuple[np.ndarray, np.ndarray] | None:
+        if not self.clip_enabled or not self.models:
+            return None
+        xmin, xmax, ymin, ymax, zmin, zmax = self._compute_bounds()
+        axis = int(self.clip_axis) % 3
+        lo = (xmin, ymin, zmin)[axis]
+        hi = (xmax, ymax, zmax)[axis]
+        p = lo + float(self.clip_frac) * max(hi - lo, 1.0)
+        pad = 4.0
+        if axis == 0:
+            pts = np.array([
+                [p, ymin - pad, zmin - pad], [p, ymax + pad, zmin - pad],
+                [p, ymax + pad, zmax + pad], [p, ymin - pad, zmax + pad],
+            ], dtype=float)
+        elif axis == 1:
+            pts = np.array([
+                [xmin - pad, p, zmin - pad], [xmax + pad, p, zmin - pad],
+                [xmax + pad, p, zmax + pad], [xmin - pad, p, zmax + pad],
+            ], dtype=float)
+        else:
+            pts = np.array([
+                [xmin - pad, ymin - pad, p], [xmax + pad, ymin - pad, p],
+                [xmax + pad, ymax + pad, p], [xmin - pad, ymax + pad, p],
+            ], dtype=float)
+        faces = np.array([[pts[0], pts[1], pts[2]], [pts[0], pts[2], pts[3]]])
+        return pts, faces
+
+    def _draw_clip_plane_mpl(self) -> None:
+        geom = self._clip_plane_geom()
+        if geom is None:
+            return
+        _, faces = geom
+        self.ax.add_collection3d(Poly3DCollection(
+            faces, facecolors=[(0.53, 0.70, 0.98, 0.18)] * 2,
+            edgecolors="#89B4FA", linewidths=0.8,
+        ))
+
+    def _draw_clip_plane_pv(self) -> None:
+        geom = self._clip_plane_geom()
+        if geom is None or not self.use_pyvista:
+            return
+        _, faces = geom
+        n = len(faces)
+        ff = np.hstack([np.full((n, 1), 3), np.arange(n * 3).reshape(-1, 3)])
+        mesh = PolyData(faces.reshape(-1, 3), ff.flatten())
+        actor = self.plotter.add_mesh(mesh, color="#89B4FA", opacity=0.18)
+        self._pv_particle_actors.append(actor)
+
+    def set_sim_fields(self, fields: dict | None) -> None:
+        self._sim_fields = fields or {}
+        self.render(self._anim_frac)
+
+    def set_clip(self, enabled: bool, axis: int | None = None, frac: float | None = None) -> None:
+        self.clip_enabled = bool(enabled)
+        if axis is not None:
+            self.clip_axis = int(axis) % 3
+        if frac is not None:
+            self.clip_frac = float(np.clip(frac, 0.0, 1.0))
+        self.render(self._anim_frac)
+
+    def _face_sim_field(self, verts: np.ndarray, key: str) -> np.ndarray | None:
+        arr = self._sim_fields.get(key)
+        if arr is None:
+            return None
+        arr = np.asarray(arr)
+        if len(arr) != len(verts):
+            # Concatenated world mesh — try matching total face count
+            chunks = []
+            for name, data in self.models.items():
+                v = self._apply_transform(data["render_data"], self.transforms[name])
+                chunks.append(len(v))
+            total = int(sum(chunks))
+            if len(arr) != total:
+                return None
+            # Caller passes one model's verts; find its slice
+            offset = 0
+            for name, data in self.models.items():
+                v = self._apply_transform(data["render_data"], self.transforms[name])
+                n = len(v)
+                if n == len(verts) and np.allclose(v[:1], verts[:1], atol=1e-3):
+                    return arr[offset:offset + n]
+                offset += n
+            return None
+        return arr
+
+    def _scalar_rgba(self, values: np.ndarray, cmap: str = "coolwarm") -> np.ndarray:
+        v = np.asarray(values, dtype=float)
+        if len(v) == 0:
+            return np.zeros((0, 4))
+        lo, hi = float(np.nanmin(v)), float(np.nanmax(v))
+        t = (v - lo) / max(hi - lo, 1e-9)
+        try:
+            return np.asarray(_cm.get_cmap(cmap)(t))
+        except Exception:
+            rgba = np.zeros((len(t), 4))
+            rgba[:, 0] = t
+            rgba[:, 2] = 1.0 - t
+            rgba[:, 3] = 1.0
+            return rgba
+
+    def _result_colors(self, name: str, verts: np.ndarray) -> np.ndarray:
+        mode = self.overlay_mode
+        if mode == "hotspot":
+            thick = self._face_thickness(name, verts)
+            return self._scalar_rgba(thick, "hot")
+        key = {"freeze": "freeze", "fill": "fill", "porosity": "porosity",
+               "niyama": "niyama"}.get(mode)
+        if key:
+            field = self._face_sim_field(verts, key)
+            if field is not None:
+                cmap = "coolwarm" if key != "niyama" else "viridis"
+                if key == "niyama":
+                    field = -np.asarray(field)  # low Ny (risk) → hot
+                return self._scalar_rgba(field, cmap)
+            if mode == "freeze":
+                thick = self._face_thickness(name, verts)
+                return self._scalar_rgba(thick, "hot")
+        return np.tile(np.array(self._metal_rgb() + (1.0,)), (len(verts), 1))
+
+    def _add_mpl_result_overlay(self, name: str, verts: np.ndarray) -> None:
+        colors = self._result_colors(name, verts)
+        keep = self._clip_mask(verts)
+        if not np.any(keep):
+            return
+        self.ax.add_collection3d(
+            Poly3DCollection(verts[keep], facecolors=colors[keep], edgecolors="none")
+        )
+
+    def _add_pv_result_overlay(self, name: str, verts: np.ndarray) -> None:
+        colors = self._result_colors(name, verts)[:, :3]
+        keep = self._clip_mask(verts)
+        if not np.any(keep):
+            return
+        fv, rgb = verts[keep], colors[keep]
+        n_f = len(fv)
+        ff = np.hstack([np.full((n_f, 1), 3), np.arange(n_f * 3).reshape(-1, 3)])
+        fmesh = PolyData(fv.reshape(-1, 3), ff.flatten())
+        actor = self.plotter.add_mesh(fmesh, scalars=rgb, rgb=True, smooth_shading=True)
+        self._pv_actors[name]["fill"] = actor
+
+    def _draw_chills_mpl(self, z_part: float) -> None:
+        if not self.chills:
+            return
+        rgb = self._hex_to_rgb(CHILL_COLOR)
+        for c in self.chills:
+            faces = self._make_cylinder_mesh(
+                cx=float(c[0]), cy=float(c[1]),
+                z_bottom=float(c[2]) - 4.0, r_bottom=8.0, r_top=8.0, height=8.0, sides=12,
+            )
+            colors = self._shade_faces(faces, rgb, alpha=0.9)
+            self.ax.add_collection3d(Poly3DCollection(
+                faces, facecolors=colors[:, :3], edgecolor="none", shade=True,
+            ))
+
+    def _add_pv_chills(self, z_part: float) -> None:
+        for c in self.chills:
+            faces = self._make_cylinder_mesh(
+                cx=float(c[0]), cy=float(c[1]),
+                z_bottom=float(c[2]) - 4.0, r_bottom=8.0, r_top=8.0, height=8.0, sides=12,
+            )
+            self._add_pv_gating_mesh(faces, CHILL_COLOR, 0.9)
+
+    def place_gating(self, kind: str, x: float, y: float, z: float | None = None) -> None:
+        """Drop sprue / gate / riser / chill at a clicked world XY."""
+        xmin, xmax, ymin, ymax, zmin, zmax = self._compute_bounds()
+        names = list(self.gating)
+        zz = float(zmin if z is None else z)
+        if kind == "sprue":
+            self.sprue_offset = np.array([x, y], dtype=float)
+            if "Tapered Sprue" not in names:
+                names.append("Tapered Sprue")
+            self.selected_gating = "Tapered Sprue"
+        elif kind == "gate":
+            self.sprue_offset = np.array([x, y], dtype=float)
+            for n in ("Fan Gate", "Tapered Sprue", "Runner (Horizontal)"):
+                if n not in names:
+                    names.append(n)
+            self.selected_gating = "Fan Gate"
+        elif kind == "riser":
+            self.riser_offset = np.array([x, y], dtype=float)
+            if "Riser (Open)" not in names:
+                names.append("Riser (Open)")
+            self.selected_gating = "Riser (Open)"
+        elif kind == "chill":
+            self.chills.append(np.array([x, y, zz], dtype=float))
+        self.gating = names
+        self.pick_mode = ""
+        self.render(self._anim_frac)
+        self.gating_moved.emit({
+            "sprue_x": float(self.sprue_offset[0]),
+            "sprue_y": float(self.sprue_offset[1]),
+            "riser_x": float(self.riser_offset[0]),
+            "riser_y": float(self.riser_offset[1]),
+        })
+        self.gating_list_changed.emit(list(self.gating))
+        if kind != "chill" and self.selected_gating:
+            self.gating_selected.emit(self.selected_gating)
 
     def _clock_label(self) -> str:
         if self._solidify_frac > 0 and self._clock_solidify_min:
@@ -1542,16 +1802,23 @@ class Viewport3D(QWidget):
 
     def _add_mpl_inspect_overlay(self, name: str, verts: np.ndarray) -> None:
         colors = self._inspect_colors(verts)
+        keep = self._clip_mask(verts)
+        if not np.any(keep):
+            return
         self.ax.add_collection3d(
-            Poly3DCollection(verts, facecolors=colors, edgecolors="none")
+            Poly3DCollection(verts[keep], facecolors=colors[keep], edgecolors="none")
         )
 
     def _add_pv_inspect_overlay(self, name: str, verts: np.ndarray) -> None:
         colors = self._inspect_colors(verts)[:, :3]
-        n_f = len(verts)
+        keep = self._clip_mask(verts)
+        if not np.any(keep):
+            return
+        fv, rgb = verts[keep], colors[keep]
+        n_f = len(fv)
         ff = np.hstack([np.full((n_f, 1), 3), np.arange(n_f * 3).reshape(-1, 3)])
-        fmesh = PolyData(verts.reshape(-1, 3), ff.flatten())
-        actor = self.plotter.add_mesh(fmesh, scalars=colors, rgb=True, smooth_shading=True)
+        fmesh = PolyData(fv.reshape(-1, 3), ff.flatten())
+        actor = self.plotter.add_mesh(fmesh, scalars=rgb, rgb=True, smooth_shading=True)
         self._pv_actors[name]["fill"] = actor
 
     def set_show_as_cast(self, on: bool) -> None:
@@ -1620,7 +1887,9 @@ class Viewport3D(QWidget):
 
     def _add_mpl_solidify_overlay(self, name: str, verts: np.ndarray) -> None:
         """Surface-first freeze: thin local sections solidify first."""
-        depths = self._face_thickness(name, verts)
+        depths = self._face_sim_field(verts, "freeze")
+        if depths is None:
+            depths = self._face_thickness(name, verts)
         if len(depths) == 0:
             return
         dmax = max(float(depths.max()), 1e-9)
@@ -1634,7 +1903,9 @@ class Viewport3D(QWidget):
         )
 
     def _add_pv_solidify_overlay(self, name: str, verts: np.ndarray) -> None:
-        depths = self._face_thickness(name, verts)
+        depths = self._face_sim_field(verts, "freeze")
+        if depths is None:
+            depths = self._face_thickness(name, verts)
         if len(depths) == 0:
             return
         dmax = max(float(depths.max()), 1e-9)
@@ -1663,6 +1934,8 @@ class Viewport3D(QWidget):
         runner_width: float | None = None,
         runner_height: float | None = None,
         gate_area: float | None = None,
+        riser_r: float | None = None,
+        riser_h: float | None = None,
     ) -> None:
         if sprue_top_r is not None:
             self.sprue_top_radius = float(sprue_top_r)
@@ -1676,6 +1949,10 @@ class Viewport3D(QWidget):
             self.runner_height = float(runner_height)
         if gate_area is not None:
             self.gate_area = float(gate_area)
+        if riser_r is not None:
+            self.riser_radius = float(riser_r)
+        if riser_h is not None:
+            self.riser_height = float(riser_h)
         self.render(self._anim_frac)
 
     def defect_sites(self) -> dict:
@@ -1828,8 +2105,8 @@ class Viewport3D(QWidget):
             "gate_area_mm2":    self.gate_area if has_gate else None,
             "has_riser":        "Riser (Open)" in self.gating,
             "runner_length_mm": self.runner_length if has_runner else None,
-            "riser_r_mm":       20.0 if "Riser (Open)" in self.gating else None,
-            "riser_h_mm":       60.0 if "Riser (Open)" in self.gating else None,
+            "riser_r_mm":       self.riser_radius if "Riser (Open)" in self.gating else None,
+            "riser_h_mm":       self.riser_height if "Riser (Open)" in self.gating else None,
         }
 
 
@@ -1901,6 +2178,17 @@ class Viewport3D(QWidget):
                 frac = float(np.clip((z_hit - zmin) / part_h, 0.05, 0.95))
                 self.pick_mode = ""
                 self.parting_picked.emit(frac)
+            try:
+                obj.AbortFlagOn()
+            except Exception:
+                pass
+            return
+
+        if self.pick_mode in ("sprue", "gate", "riser", "chill"):
+            hit = self._pv_world_on_plane(xy[0], xy[1], z_part)
+            z_hit = self._pv_ray_z(xy[0], xy[1], zmin, zmax)
+            if hit is not None:
+                self.place_gating(self.pick_mode, float(hit[0]), float(hit[1]), z_hit)
             try:
                 obj.AbortFlagOn()
             except Exception:
@@ -2032,6 +2320,11 @@ class Viewport3D(QWidget):
             frac = float(np.clip(1.0 - (my - bbox.y0) / max(bbox.height, 1), 0.05, 0.95))
             self.pick_mode = ""
             self.parting_picked.emit(frac)
+            return
+
+        if self.pick_mode in ("sprue", "gate", "riser", "chill"):
+            if event.xdata is not None and event.ydata is not None:
+                self.place_gating(self.pick_mode, float(event.xdata), float(event.ydata), z_part)
             return
 
         picked = ""
@@ -2272,6 +2565,8 @@ class Viewport3D(QWidget):
         self.models.clear()
         self.transforms.clear()
         self.active_model = ""
+        self.chills = []
+        self._sim_fields = {}
 
         self._gating_geo_cache.clear()
         self._gating_cache_key = ()

@@ -6,8 +6,8 @@ from PyQt6.QtWidgets import (
     QProgressBar, QFileDialog, QInputDialog, QMessageBox, QSpinBox,
     QListWidget, QListWidgetItem, QTextBrowser, QFrame,
 )
-from PyQt6.QtCore import Qt, QThread, QUrl, QShortcut
-from PyQt6.QtGui import QKeySequence, QDragEnterEvent, QDropEvent
+from PyQt6.QtCore import Qt, QThread, QUrl
+from PyQt6.QtGui import QKeySequence, QDragEnterEvent, QDropEvent, QShortcut
 import numpy as np
 from ui.style import APP_STYLE
 from ui.collapsible import CollapsiblePanel
@@ -18,12 +18,16 @@ from results.formatter import build_results_text, empty_results_html
 from constants import (
     METAL_DEFAULTS, FLASK_SIZES, shrink_scale_from_slider, DEFAULT_FLASK_HEIGHT_IN,
     MOLD_TYPES, GATING_RATIOS, DEFAULT_SHELL_MM, SHELL_MM_MIN,
-    SHELL_MM_MAX, CERAMIC_SHELL,
+    SHELL_MM_MAX, CERAMIC_SHELL, SHOP_RECIPES,
 )
 from simulation.mesh_tools import scale_geometry, local_thickness, THIN_WALL_MM
 from simulation.foundry import (
     apply_gating_ratio, flask_fit, recommended_pour_band, draft_analysis,
     undercut_hints, is_shell_mold, recommended_shell_preheat_f,
+)
+from simulation.shop import (
+    size_rigging, recipe as shop_recipe, write_pattern_stl, compare_setups,
+    pattern_ticket,
 )
 from simulation.session import (
     save_session, load_session, recent_projects, remember_project, default_session,
@@ -47,6 +51,7 @@ class MainWindow(QMainWindow):
         self._is_demo = False
         self._undo_stack: list[dict] = []
         self._session_path = None
+        self._baseline_result = None
 
         self.viewport = Viewport3D()
         self._sand_molds = [n for n in MOLD_TYPES if n != CERAMIC_SHELL]
@@ -117,6 +122,19 @@ class MainWindow(QMainWindow):
         res_cap = QLabel("RESULTS")
         res_cap.setObjectName("caption")
         right_l.addWidget(res_cap)
+        cmp = QHBoxLayout()
+        self.keep_a_btn = QPushButton("Keep as A")
+        self.keep_a_btn.setObjectName("ghostBtn")
+        self.keep_a_btn.setToolTip("Store this pour, then simulate a second setup to compare.")
+        self.clear_a_btn = QPushButton("Clear A")
+        self.clear_a_btn.setObjectName("ghostBtn")
+        cmp.addWidget(self.keep_a_btn)
+        cmp.addWidget(self.clear_a_btn)
+        right_l.addLayout(cmp)
+        self.compare_label = QLabel("")
+        self.compare_label.setObjectName("hint")
+        self.compare_label.setWordWrap(True)
+        right_l.addWidget(self.compare_label)
         self.results_text = QTextBrowser()
         self.results_text.setOpenExternalLinks(False)
         self.results_text.setOpenLinks(False)
@@ -250,6 +268,15 @@ class MainWindow(QMainWindow):
         row.addWidget(self.sand_btn)
         row.addWidget(self.shell_btn)
         lay.addLayout(row)
+        lay.addWidget(self._caption("Shop recipe"))
+        self.recipe_combo = QComboBox()
+        self.recipe_combo.addItem("Custom…")
+        for name in SHOP_RECIPES:
+            self.recipe_combo.addItem(name)
+        self.recipe_combo.setToolTip(
+            "Named process templates — metal, mould, and temps in one click."
+        )
+        lay.addWidget(self.recipe_combo)
         panel.content_layout.addWidget(box)
         parent.addWidget(panel)
         panel.setExpanded(True)
@@ -258,11 +285,41 @@ class MainWindow(QMainWindow):
         panel = CollapsiblePanel("Gating")
         box = QWidget()
         lay = QVBoxLayout(box)
+        self.gating_hint = QLabel("Click a face to drop a sprue, gate, or riser.")
+        self.gating_hint.setWordWrap(True)
+        self.gating_hint.setStyleSheet("color: #A6ADC8;")
+        lay.addWidget(self.gating_hint)
+        place = QHBoxLayout()
+        self.pick_sprue_btn = QPushButton("Sprue")
+        self.pick_gate_btn = QPushButton("Gate")
+        self.pick_riser_btn = QPushButton("Riser")
+        self.pick_chill_btn = QPushButton("Chill")
+        for b, tip in (
+            (self.pick_sprue_btn, "Click the part to drop the sprue."),
+            (self.pick_gate_btn, "Click a face to drop the fan gate."),
+            (self.pick_riser_btn, "Click the hot spot to drop an open riser."),
+            (self.pick_chill_btn, "Click a thick section to plant a chill."),
+        ):
+            b.setObjectName("ghostBtn")
+            b.setToolTip(tip)
+            place.addWidget(b)
+        lay.addLayout(place)
+        self.wizard_btn = QPushButton("Size sprue, runner, gate, riser")
+        self.wizard_btn.setObjectName("primaryBtn")
+        self.wizard_btn.setToolTip(
+            "Rigging wizard — sizes the whole tree for this metal and part."
+        )
+        lay.addWidget(self.wizard_btn)
+
         self.gating_checkboxes = {}
         for comp in ["Tapered Sprue", "Runner (Horizontal)", "Fan Gate", "Riser (Open)"]:
             cb = QCheckBox(comp)
             self.gating_checkboxes[comp] = cb
             lay.addWidget(cb)
+        self.sleeve_cb = QCheckBox("Insulating sleeve on riser")
+        self.sleeve_cb.setToolTip("Slows freeze around the riser (exothermic / sleeve).")
+        lay.addWidget(self.sleeve_cb)
+
         lay.addWidget(QLabel("Ratio preset"))
         self.ratio_combo = QComboBox()
         for name in GATING_RATIOS:
@@ -274,10 +331,6 @@ class MainWindow(QMainWindow):
         row.addWidget(self.snap_btn)
         lay.addWidget(self.ratio_combo)
         lay.addLayout(row)
-        self.gating_hint = QLabel("Click a gating piece in 3D to edit its size.")
-        self.gating_hint.setWordWrap(True)
-        self.gating_hint.setStyleSheet("color: #A6ADC8;")
-        lay.addWidget(self.gating_hint)
 
         self.sprue_dim_box, self.sprue_top_slider, self.sprue_top_label = None, None, None
         self._gating_dim_widgets: dict[str, QWidget] = {}
@@ -286,10 +339,10 @@ class MainWindow(QMainWindow):
         sl = QVBoxLayout(sprue_w)
         sl.setContentsMargins(0, 0, 0, 0)
         self.sprue_top_slider, self.sprue_top_label = self._mm_slider(
-            sl, "Sprue top r", 4, 20, 8, "Radius at the pouring basin (mm).",
+            sl, "Sprue top r", 4, 30, 8, "Radius at the pouring basin (mm).",
         )
         self.sprue_bot_slider, self.sprue_bot_label = self._mm_slider(
-            sl, "Sprue exit r", 2, 12, 4, "Radius at the runner — usually the choke.",
+            sl, "Sprue exit r", 2, 20, 4, "Radius at the runner — usually the choke.",
         )
         self.sprue_h_slider, self.sprue_h_label = self._mm_slider(
             sl, "Sprue height", 40, 250, 100, "Basin length above the cope.",
@@ -303,10 +356,10 @@ class MainWindow(QMainWindow):
         rl = QVBoxLayout(run_w)
         rl.setContentsMargins(0, 0, 0, 0)
         self.runner_w_slider, self.runner_w_label = self._mm_slider(
-            rl, "Runner width", 4, 24, 10, "Cross-section width (mm).",
+            rl, "Runner width", 4, 50, 10, "Cross-section width (mm).",
         )
         self.runner_h_slider, self.runner_h_label = self._mm_slider(
-            rl, "Runner height", 4, 20, 8, "Cross-section height (mm).",
+            rl, "Runner height", 4, 30, 8, "Cross-section height (mm).",
         )
         lay.addWidget(run_w)
         self._gating_dim_widgets["Runner (Horizontal)"] = run_w
@@ -315,7 +368,7 @@ class MainWindow(QMainWindow):
         gl = QVBoxLayout(gate_w)
         gl.setContentsMargins(0, 0, 0, 0)
         self.gate_area_slider, self.gate_area_label = self._mm_slider(
-            gl, "Gate area", 10, 200, 40, "Fan-gate hydraulic area (mm²).",
+            gl, "Gate area", 10, 400, 40, "Fan-gate hydraulic area (mm²).",
         )
         lay.addWidget(gate_w)
         self._gating_dim_widgets["Fan Gate"] = gate_w
@@ -323,6 +376,12 @@ class MainWindow(QMainWindow):
         riser_w = QWidget()
         risl = QVBoxLayout(riser_w)
         risl.setContentsMargins(0, 0, 0, 0)
+        self.riser_r_slider, self.riser_r_label = self._mm_slider(
+            risl, "Riser radius", 8, 40, 20, "Open-riser radius (mm).",
+        )
+        self.riser_h_slider, self.riser_h_label = self._mm_slider(
+            risl, "Riser height", 24, 120, 60, "Open-riser height (mm).",
+        )
         self.riser_x_slider, self.riser_x_label = self._mm_slider(risl, "Riser X", -200, 200, 0)
         self.riser_y_slider, self.riser_y_label = self._mm_slider(risl, "Riser Y", -200, 200, 0)
         lay.addWidget(riser_w)
@@ -507,9 +566,13 @@ class MainWindow(QMainWindow):
         scale_val = shrink_scale_from_slider(106)
         self.shrink_label = QLabel(f"Shrinkage: {shrink_pct}%  ·  scale ×{scale_val:.3f}")
         self.as_cast_cb = QCheckBox("Show as-cast (no pattern scale)")
+        self.export_pattern_btn = QPushButton("Export pattern STL…")
+        self.export_pattern_btn.setObjectName("ghostBtn")
+        self.export_pattern_btn.setToolTip("Write the mesh at the shrink scale — print this for lost-PLA.")
         lay.addWidget(self.shrink_label)
         lay.addWidget(self.shrink_slider)
         lay.addWidget(self.as_cast_cb)
+        lay.addWidget(self.export_pattern_btn)
         panel.content_layout.addWidget(box)
         parent.addWidget(panel)
         panel.setExpanded(False)
@@ -520,14 +583,39 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(box)
         self.draft_cb = QCheckBox("Draft overlay (red = lock)")
         self.undercut_cb = QCheckBox("Undercut / core-print overlay")
+        self.hotspot_cb = QCheckBox("Hot-spot overlay (last to freeze)")
+        lay.addWidget(self._caption("Result layer"))
+        self.overlay_combo = QComboBox()
+        self.overlay_combo.addItem("None", "")
+        self.overlay_combo.addItem("Hot-spot (thickness)", "hotspot")
+        self.overlay_combo.addItem("Last-to-freeze", "freeze")
+        self.overlay_combo.addItem("Fill order", "fill")
+        self.overlay_combo.addItem("Porosity", "porosity")
+        self.overlay_combo.addItem("Niyama proxy", "niyama")
+        self.clip_cb = QCheckBox("Cut plane")
+        self.clip_axis_combo = QComboBox()
+        self.clip_axis_combo.addItems(["X", "Y", "Z"])
+        self.clip_axis_combo.setCurrentIndex(2)
+        self.clip_slider = QSlider(Qt.Orientation.Horizontal)
+        self.clip_slider.setRange(0, 100)
+        self.clip_slider.setValue(50)
+        self.clip_label = QLabel("Cut: 50%")
         self.inspect_label = QLabel("")
         self.inspect_label.setWordWrap(True)
         lay.addWidget(self.draft_cb)
         lay.addWidget(self.undercut_cb)
+        lay.addWidget(self.hotspot_cb)
+        lay.addWidget(self.overlay_combo)
+        lay.addWidget(self.clip_cb)
+        clip_row = QHBoxLayout()
+        clip_row.addWidget(self.clip_axis_combo)
+        clip_row.addWidget(self.clip_slider)
+        lay.addLayout(clip_row)
+        lay.addWidget(self.clip_label)
         lay.addWidget(self.inspect_label)
         panel.content_layout.addWidget(box)
         parent.addWidget(panel)
-        panel.setExpanded(False)
+        panel.setExpanded(True)
 
     def _mm_slider(self, layout, title, vmin, vmax, value, tooltip=""):
         lab = QLabel(f"{title}: {value}")
@@ -592,17 +680,33 @@ class MainWindow(QMainWindow):
         for sl in (
             self.sprue_top_slider, self.sprue_bot_slider, self.sprue_h_slider,
             self.runner_w_slider, self.runner_h_slider, self.gate_area_slider,
+            self.riser_r_slider, self.riser_h_slider,
         ):
             sl.valueChanged.connect(lambda _v: self._on_gating_dims())
         self._on_gating_dims()
 
         self.apply_ratio_btn.clicked.connect(self._on_apply_ratio)
         self.snap_btn.clicked.connect(self._on_snap)
+        self.wizard_btn.clicked.connect(self._on_wizard)
+        self.pick_sprue_btn.clicked.connect(lambda: self._start_place("sprue"))
+        self.pick_gate_btn.clicked.connect(lambda: self._start_place("gate"))
+        self.pick_riser_btn.clicked.connect(lambda: self._start_place("riser"))
+        self.pick_chill_btn.clicked.connect(lambda: self._start_place("chill"))
+        self.recipe_combo.currentTextChanged.connect(self._on_recipe)
+        self.export_pattern_btn.clicked.connect(self._on_export_pattern)
+        self.keep_a_btn.clicked.connect(self._on_keep_a)
+        self.clear_a_btn.clicked.connect(self._on_clear_a)
+        self.hotspot_cb.toggled.connect(self._on_inspect)
+        self.overlay_combo.currentIndexChanged.connect(self._on_overlay_combo)
+        self.clip_cb.toggled.connect(self._on_clip_changed)
+        self.clip_axis_combo.currentIndexChanged.connect(self._on_clip_changed)
+        self.clip_slider.valueChanged.connect(self._on_clip_changed)
 
         self.viewport.gating_moved.connect(self._on_gating_moved)
         self.viewport.model_moved.connect(self._on_model_moved)
         self.viewport.gating_selected.connect(self._on_gating_selected)
         self.viewport.parting_picked.connect(self._on_parting_picked)
+        self.viewport.gating_list_changed.connect(self._on_gating_list)
         self.viewport.drag_began.connect(self._push_undo)
         self.results_text.anchorClicked.connect(self._on_result_anchor)
 
@@ -648,6 +752,8 @@ class MainWindow(QMainWindow):
             runner_width=self.runner_w_slider.value(),
             runner_height=self.runner_h_slider.value(),
             gate_area=self.gate_area_slider.value(),
+            riser_r=self.riser_r_slider.value(),
+            riser_h=self.riser_h_slider.value(),
         )
 
     def _on_gating_toggled(self) -> None:
@@ -694,7 +800,7 @@ class MainWindow(QMainWindow):
             runner_height_mm=self.runner_h_slider.value(),
         )
         self.runner_w_slider.setValue(int(round(sized["runner_width_mm"])))
-        self.gate_area_slider.setValue(int(round(max(10, min(200, sized["gate_area_mm2"])))))
+        self.gate_area_slider.setValue(int(round(max(10, min(400, sized["gate_area_mm2"])))))
         for name in ("Tapered Sprue", "Runner (Horizontal)", "Fan Gate"):
             self.gating_checkboxes[name].setChecked(True)
         self._on_gating_dims()
@@ -705,6 +811,150 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Snap", "Load a part first.")
             return
         self.viewport.snap_gating_to_part()
+
+    def _start_place(self, kind: str) -> None:
+        if not self.viewport.models:
+            QMessageBox.information(self, "Place gating", "Load a part first.")
+            return
+        self.viewport.pick_mode = kind
+        labels = {
+            "sprue": "Click a face to drop the sprue…",
+            "gate": "Click a face to drop the fan gate…",
+            "riser": "Click the hot spot to drop the riser…",
+            "chill": "Click a thick section to plant a chill…",
+        }
+        self.gating_hint.setText(labels.get(kind, "Click the viewport…"))
+
+    def _on_gating_list(self, names: list) -> None:
+        for name, cb in self.gating_checkboxes.items():
+            cb.blockSignals(True)
+            cb.setChecked(name in names)
+            cb.blockSignals(False)
+        self.viewport.set_gating(list(names))
+
+    def _on_wizard(self) -> None:
+        if not self.viewport.models:
+            QMessageBox.information(self, "Rigging wizard", "Load a part first.")
+            return
+        self._push_undo()
+        metal = self.metal_combo.currentText()
+        scale = shrink_scale_from_slider(self.shrink_slider.value())
+        vol, surf, _z = scale_geometry(
+            self._geometry_stats.get("vol_cm3", 100.0),
+            self._geometry_stats.get("surf_cm2", 120.0),
+            self._geometry_stats.get("z_max", 100.0),
+            scale,
+        )
+        sized = size_rigging(vol, surf, metal, sprue_h_mm=self.sprue_h_slider.value())
+        self.ratio_combo.setCurrentText(sized["ratio_label"])
+        self.sprue_bot_slider.setValue(int(round(sized["sprue_bot_r_mm"])))
+        self.sprue_top_slider.setValue(int(round(sized["sprue_top_r_mm"])))
+        self.sprue_h_slider.setValue(int(round(sized["sprue_h_mm"])))
+        self.runner_w_slider.setValue(int(round(sized["runner_width_mm"])))
+        self.runner_h_slider.setValue(int(round(sized["runner_height_mm"])))
+        self.gate_area_slider.setValue(int(round(sized["gate_area_mm2"])))
+        self.riser_r_slider.setValue(int(round(sized["riser_r_mm"])))
+        self.riser_h_slider.setValue(int(round(sized["riser_h_mm"])))
+        for name in ("Tapered Sprue", "Runner (Horizontal)", "Fan Gate", "Riser (Open)"):
+            self.gating_checkboxes[name].setChecked(True)
+        self._on_gating_dims()
+        self.gating_hint.setText(
+            f"Sized {sized['ratio_label']} · sprue Ø {2 * sized['sprue_bot_r_mm']:.0f} mm · "
+            f"riser Ø {2 * sized['riser_r_mm']:.0f} mm · target fill {sized['target_fill_s']:.0f} s"
+        )
+        if not self.viewport.gating or "Tapered Sprue" not in self.viewport.gating:
+            self.viewport.snap_gating_to_part()
+
+    def _on_recipe(self, name: str) -> None:
+        if not name or name.startswith("Custom"):
+            return
+        rec = shop_recipe(name)
+        if not rec:
+            return
+        self._push_undo()
+        if rec.get("metal"):
+            self.metal_combo.setCurrentText(rec["metal"])
+        self._set_process("shell" if rec.get("process") == "shell" else "sand")
+        if rec.get("mold_type") and rec.get("process") != "shell":
+            idx = self.mold_combo.findText(rec["mold_type"])
+            if idx >= 0:
+                self.mold_combo.setCurrentIndex(idx)
+        if rec.get("pour_temp_f") is not None:
+            self.pour_spin.setValue(int(rec["pour_temp_f"]))
+        if rec.get("mold_temp_f") is not None:
+            self.mold_spin.setValue(int(rec["mold_temp_f"]))
+        if rec.get("shell_mm") is not None:
+            self.shell_mm_slider.setValue(int(rec["shell_mm"]))
+        if rec.get("gating_ratio"):
+            self.ratio_combo.setCurrentText(rec["gating_ratio"])
+        if rec.get("thin_wall"):
+            self.thin_combo.setCurrentText(rec["thin_wall"])
+        self._refresh_status()
+
+    def _on_export_pattern(self) -> None:
+        mesh = self.viewport.world_meshes()
+        if mesh is None:
+            QMessageBox.information(self, "Pattern STL", "Load a part first.")
+            return
+        scale = shrink_scale_from_slider(self.shrink_slider.value())
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export pattern STL",
+            f"pattern_x{scale:.3f}.stl",
+            "STL (*.stl)",
+        )
+        if not path:
+            return
+        try:
+            write_pattern_stl(mesh, path, scale)
+        except Exception as e:
+            QMessageBox.critical(self, "Export failed", str(e))
+            return
+        ticket = pattern_ticket(self.metal_combo.currentText(), self.shrink_slider.value())
+        QMessageBox.information(self, "Pattern STL", f"Saved:\n{path}\n\n{ticket['hint']}")
+
+    def _on_keep_a(self) -> None:
+        if not self._last_result:
+            QMessageBox.information(self, "Compare", "Run a simulation first.")
+            return
+        self._baseline_result = dict(self._last_result)
+        self._baseline_result.pop("voxel_faces", None)
+        label = self._last_result.get("setup_label", "A")
+        self.compare_label.setText(f"A stored: {label}. Change setup and simulate for B.")
+
+    def _on_clear_a(self) -> None:
+        self._baseline_result = None
+        self.compare_label.setText("")
+
+    def _on_overlay_combo(self) -> None:
+        mode = self.overlay_combo.currentData() or ""
+        if mode:
+            self.draft_cb.blockSignals(True)
+            self.undercut_cb.blockSignals(True)
+            self.hotspot_cb.blockSignals(True)
+            self.draft_cb.setChecked(False)
+            self.undercut_cb.setChecked(False)
+            self.hotspot_cb.setChecked(mode == "hotspot")
+            self.draft_cb.blockSignals(False)
+            self.undercut_cb.blockSignals(False)
+            self.hotspot_cb.blockSignals(False)
+            self.viewport.set_overlay_mode(str(mode))
+            self.inspect_label.setText({
+                "hotspot": "Thick sections (red) freeze last — that is the hot spot.",
+                "freeze": "Last-to-freeze from the voxel thermal pass.",
+                "fill": "Gravity-flood fill order from the gate.",
+                "porosity": "Isolated liquid — shrinkage cavities.",
+                "niyama": "Low Niyama (dark) → shrinkage risk.",
+            }.get(str(mode), ""))
+        else:
+            self._on_inspect()
+
+    def _on_clip_changed(self, *_args) -> None:
+        self.clip_label.setText(f"Cut: {self.clip_slider.value()}%")
+        self.viewport.set_clip(
+            self.clip_cb.isChecked(),
+            axis=self.clip_axis_combo.currentIndex(),
+            frac=self.clip_slider.value() / 100.0,
+        )
 
     def _on_pick_parting(self) -> None:
         self.viewport.pick_mode = "parting"
@@ -871,10 +1121,30 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Error", "Invalid format: " + str(e))
 
     def _on_inspect(self) -> None:
+        if self.hotspot_cb.isChecked():
+            self.draft_cb.blockSignals(True)
+            self.undercut_cb.blockSignals(True)
+            self.draft_cb.setChecked(False)
+            self.undercut_cb.setChecked(False)
+            self.draft_cb.blockSignals(False)
+            self.undercut_cb.blockSignals(False)
+            self.overlay_combo.blockSignals(True)
+            idx = self.overlay_combo.findData("hotspot")
+            if idx >= 0:
+                self.overlay_combo.setCurrentIndex(idx)
+            self.overlay_combo.blockSignals(False)
+            self.viewport.set_overlay_mode("hotspot")
+            self.inspect_label.setText(
+                "Thick sections (red) freeze last — 80% of what people use Niyama for."
+            )
+            return
         if self.draft_cb.isChecked():
             self.undercut_cb.blockSignals(True)
+            self.hotspot_cb.blockSignals(True)
             self.undercut_cb.setChecked(False)
+            self.hotspot_cb.setChecked(False)
             self.undercut_cb.blockSignals(False)
+            self.hotspot_cb.blockSignals(False)
             self.viewport.set_overlay_mode("draft")
             mesh = self.viewport.world_meshes()
             if mesh is not None:
@@ -887,6 +1157,9 @@ class MainWindow(QMainWindow):
                 )
             return
         if self.undercut_cb.isChecked():
+            self.hotspot_cb.blockSignals(True)
+            self.hotspot_cb.setChecked(False)
+            self.hotspot_cb.blockSignals(False)
             self.viewport.set_overlay_mode("undercut")
             mesh = self.viewport.world_meshes()
             if mesh is not None:
@@ -904,6 +1177,9 @@ class MainWindow(QMainWindow):
                         f"({100 * u['frac']:.0f}% of the surface)."
                     )
             return
+        self.overlay_combo.blockSignals(True)
+        self.overlay_combo.setCurrentIndex(0)
+        self.overlay_combo.blockSignals(False)
         self.viewport.set_overlay_mode("")
         self.inspect_label.setText("")
 
@@ -1198,6 +1474,24 @@ class MainWindow(QMainWindow):
             "z_max": z_max,
             "flask_fit": {} if self._is_shell() else self._current_flask_fit(),
         }
+        mesh = self.viewport.world_meshes()
+        if mesh is not None:
+            params["mesh_vectors"] = mesh
+        gp = params["gating_params"]
+        xmin, xmax, ymin, ymax, zmin, zmax = self.viewport._compute_bounds()
+        z_part = zmin + max(zmax - zmin, 1.0) * self.viewport.parting_z
+        params["gate_xyz"] = self.viewport._gate_xyz()
+        params["sprue_xyz"] = np.array(
+            [float(self.viewport.sprue_offset[0]), float(self.viewport.sprue_offset[1]), z_part]
+        )
+        params["riser_xyz"] = np.array(
+            [float(self.viewport.riser_offset[0]), float(self.viewport.riser_offset[1]), z_part]
+        ) if gp.get("has_riser") else None
+        params["chills_xyz"] = list(self.viewport.chills)
+        params["sleeve"] = self.sleeve_cb.isChecked()
+        params["setup_label"] = (
+            f"{'shell' if self._is_shell() else self.mold_combo.currentText()} · {metal_name}"
+        )
         self.progress_bar.setVisible(True)
         self.sim_btn.setEnabled(False)
         self.reset_btn.setEnabled(False)
@@ -1226,6 +1520,10 @@ class MainWindow(QMainWindow):
             )
             return
         self._last_result = result
+        faces = result.get("voxel_faces") or {}
+        self.viewport.set_sim_fields(faces)
+        if self._baseline_result is not None:
+            result["compare"] = compare_setups(self._baseline_result, result)
         self.results_text.setHtml(build_results_text(result))
         self.viewport.set_restrictive(result.get("restrictive_elem") or "")
         defects = result.get("defects", [])
@@ -1304,9 +1602,15 @@ class MainWindow(QMainWindow):
         self.results_text.setHtml(empty_results_html())
         self._last_result = None
         self.viewport.set_restrictive("")
+        self.viewport.set_sim_fields({})
+        self.viewport.chills = []
         self.as_cast_cb.setChecked(False)
         self.draft_cb.setChecked(False)
         self.undercut_cb.setChecked(False)
+        self.hotspot_cb.setChecked(False)
+        self.clip_cb.setChecked(False)
+        self.sleeve_cb.setChecked(False)
+        self.overlay_combo.setCurrentIndex(0)
 
     def _on_export(self) -> None:
         if not self._last_result:
