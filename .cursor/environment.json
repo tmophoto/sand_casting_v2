@@ -1,0 +1,8 @@
+{
+  "name": "sand_casting_v2 + optional local vLLM",
+  "install": "pip install -r requirements.txt -q 2>/dev/null || true",
+  "start": "bash .cursor/start-vllm-if-gpu.sh",
+  "ports": [
+    { "port": 8080, "name": "vllm-openai-api" }
+  ]
+}
