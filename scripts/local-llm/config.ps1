@@ -22,11 +22,11 @@ $Script:TensorSplit     = "1,1"       # equal split across GPU 0 and GPU 1
 $Script:MainGpu         = 0
 $Script:CudaDevices     = "0,1"
 
-# Max context: q4_0 KV cache frees the most VRAM for long windows.
+# Max context: q8_0 KV cache (higher quality than q4_0; uses more VRAM).
 # --fit on asks llama.cpp to pick the largest safe context for your VRAM.
 $Script:ContextLength   = 0           # 0 = use --fit on; set e.g. 131072 to pin manually
-$Script:KvCacheTypeK    = "q4_0"
-$Script:KvCacheTypeV    = "q4_0"
+$Script:KvCacheTypeK    = "q8_0"
+$Script:KvCacheTypeV    = "q8_0"
 $Script:UseFitParams    = $true       # auto-maximize context to available VRAM
 $Script:FlashAttention  = $true
 $Script:BatchSize       = 2048

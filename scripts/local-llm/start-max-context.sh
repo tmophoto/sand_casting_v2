@@ -47,7 +47,7 @@ export CUDA_VISIBLE_DEVICES="$CUDA_DEVICES"
 echo "Model:   $MODEL"
 echo "API:     http://$HOST:$PORT/v1"
 echo "GPUs:    $CUDA_DEVICES (layer split 1,1)"
-echo "Context: auto (--fit on) with q4_0 KV cache"
+echo "Context: auto (--fit on) with q8_0 KV cache"
 echo "Log:     $LOG"
 echo
 
