@@ -1,17 +1,29 @@
-# Start huihui-qwen3.8-27b-abliterated on dual RTX 3090 with maximum context.
+# Serve huihui-qwen3.8-27b-abliterated: ik_llama.cpp, dual 3090, max context, no MTP.
 param(
     [string]$ModelPathOverride = "",
     [int]$PortOverride = 0,
     [int]$ContextOverride = 0,
-    [switch]$EstimateOnly
+    [switch]$EstimateOnly,
+    [switch]$UseStockLlama
 )
 
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot\config.ps1"
 
-$server = Join-Path $LlamaBinDir "llama-server.exe"
-if (-not (Test-Path $server)) {
-    Write-Host "llama-server not found. Run: .\setup.ps1"
+$ikServer   = Join-Path $IkLlamaBinDir "llama-server.exe"
+$stockServer = Join-Path $LlamaBinDir "llama-server.exe"
+
+if (-not $UseStockLlama -and (Test-Path $ikServer)) {
+    $server = $ikServer
+    $engine = "ik_llama.cpp"
+    $splitMode = $SplitMode
+} elseif (Test-Path $stockServer) {
+    $server = $stockServer
+    $engine = "llama.cpp (fallback)"
+    $splitMode = "layer"
+    Write-Warning "ik_llama.cpp not found — run .\setup-ik.ps1 for best dual-GPU performance."
+} else {
+    Write-Host "No server binary found. Run: .\setup-ik.ps1"
     exit 1
 }
 
@@ -31,7 +43,7 @@ $args = @(
     "--host", $ListenHost,
     "--port", "$port",
     "-ngl", "$GpuLayers",
-    "-sm", $SplitMode,
+    "-sm", $splitMode,
     "-ts", $TensorSplit,
     "-mg", "$MainGpu",
     "--cache-type-k", $KvCacheTypeK,
@@ -44,6 +56,7 @@ $args = @(
 )
 
 if ($FlashAttention) { $args += @("-fa", "on") }
+if ($DisableCudaGraphs -and $engine -eq "ik_llama.cpp") { $args += @("-cuda", "graphs=0") }
 if ($UseFitParams -and $ctx -le 0) { $args += @("--fit", "on") }
 elseif ($ctx -gt 0) { $args += @("-c", "$ctx") }
 else { $args += @("-c", "131072") }
@@ -52,12 +65,13 @@ if ($EstimateOnly) { $args += "--estimate-only" }
 
 $env:CUDA_VISIBLE_DEVICES = $CudaDevices
 
+Write-Host "Engine:  $engine"
 Write-Host "Model:   $model"
 Write-Host "API:     http://${ListenHost}:$port/v1"
-Write-Host "GPUs:    $CudaDevices  split=$SplitMode  ts=$TensorSplit"
+Write-Host "GPUs:    $CudaDevices  split=$splitMode  ts=$TensorSplit"
 Write-Host "Context: $(if ($UseFitParams -and $ctx -le 0) { 'auto (--fit on)' } else { $ctx })"
 Write-Host "KV:      k=$KvCacheTypeK v=$KvCacheTypeV"
-Write-Host "MTP:     OFF (abliterated model)"
+Write-Host "MTP:     OFF (abliterated — required)"
 Write-Host "Log:     $logFile"
 Write-Host ""
 
@@ -66,5 +80,4 @@ if ($EstimateOnly) {
     exit $LASTEXITCODE
 }
 
-# Tee logs for debugging offload layer counts / fitted context.
 & $server @args 2>&1 | Tee-Object -FilePath $logFile
