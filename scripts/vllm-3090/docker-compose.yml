@@ -1,0 +1,62 @@
+# Fastest validated abliterated Qwen3.8-27B for 2× RTX 3090.
+# Benchmarks: ~84 tok/s (MTP on), 262K context — twolven/Qwen3.8-27B-abliterated-AWQ-MTP
+# Needs Docker + NVIDIA Container Toolkit. On Windows, use WSL2.
+
+services:
+  vllm:
+    image: vllm/vllm-openai:v0.27.1
+    container_name: qwen38-abliterated-3090
+    restart: unless-stopped
+    ipc: host
+    shm_size: "16gb"
+    ports:
+      - "${HOST_PORT:-8080}:8000"
+    volumes:
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - NCCL_P2P_DISABLE=1
+      - CUDA_VISIBLE_DEVICES=0,1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 2
+              capabilities: [gpu]
+    command:
+      - --model
+      - twolven/Qwen3.8-27B-abliterated-AWQ-MTP
+      - --served-model-name
+      - qwen3.8-27b-abliterated
+      - --tensor-parallel-size
+      - "2"
+      - --max-model-len
+      - "262144"
+      - --gpu-memory-utilization
+      - "0.95"
+      - --max-num-seqs
+      - "4"
+      - --max-num-batched-tokens
+      - "4096"
+      - --kv-cache-dtype
+      - fp8
+      - --performance-mode
+      - interactivity
+      - --mm-encoder-tp-mode
+      - data
+      - --disable-custom-all-reduce
+      - --reasoning-parser
+      - qwen3
+      - --default-chat-template-kwargs
+      - '{"enable_thinking": true, "reasoning_effort": "medium"}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+      - --enable-prefix-caching
+      - --enable-chunked-prefill
+      - --compilation-config
+      - '{"cudagraph_mode": "PIECEWISE"}'
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":3}'
+      - --trust-remote-code
